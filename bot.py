@@ -171,6 +171,7 @@ async def on_ready():
 async def on_message(message):
     global last_response_time
 
+    # Use config_data dynamically so commands like !ban take effect immediately
     if message.author.id in config_data.get("BANNED_USERS", []):
         return
 
@@ -184,6 +185,7 @@ async def on_message(message):
     if allowed_channels and message.channel.id not in allowed_channels:
         return
 
+    # Check for direct text commands handled without the framework
     if message.content.startswith(f"{COMMAND_PREFIX}paint ") and message.author.id in config_data.get("ALLOWED_PAINT_USERS", []):
         prompt = message.content[len(f"{COMMAND_PREFIX}paint "):].strip()
         if prompt:
@@ -202,7 +204,7 @@ async def on_message(message):
             await process_song_request(message, prompt)
             return
 
-    if bot.user not in message.mentions:
+    if bot.user not in message.mentions and not is_self_cmd:
         await bot.process_commands(message)
         return
 
@@ -211,7 +213,11 @@ async def on_message(message):
         return
     
     if gemini_client:
-        user_msg = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
+        if is_self_cmd:
+            user_msg = message.content[len(f"{COMMAND_PREFIX}self "):].strip()
+        else:
+            user_msg = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
+            
         if not user_msg:
             return
             
@@ -234,6 +240,11 @@ async def on_message(message):
                 author_name = hist_msg.author.display_name
                 clean_content = hist_msg.content.replace(AI_MARKER, '')
                 clean_content = clean_content.replace(f'<@{bot.user.id}>', f'@{bot.user.name}').replace(f'<@!{bot.user.id}>', f'@{bot.user.name}')
+                
+                # Strip the !self command from chat history context so AI doesn't get confused
+                if clean_content.startswith(f"{COMMAND_PREFIX}self "):
+                    clean_content = clean_content[len(f"{COMMAND_PREFIX}self "):].strip()
+                    
                 if clean_content.strip():
                     chat_history += f"{author_name}: {clean_content}\n"
         except:
