@@ -24,7 +24,7 @@ load_dotenv()
 # This is what you HAVE to have in the .env file:
 #   GEMINI_API_KEY=your_api_key_here
 #   DISCORD_TOKEN=your_discord_token_here
-# You can get your API key from AI Studio: https://aistudio.google.com/api-keys (This will only be used when prompted to generate an Song)
+# You can get your API key from AI Studio: https://aistudio.google.com/api-keys (This will only be used when prompted to generate a Song)
 
 CONFIG_FILE = "config.json"
 # This is what you can add to the config.json file:
@@ -34,7 +34,8 @@ CONFIG_FILE = "config.json"
 #     "BANNED_USERS": [],
 #     "ALLOWED_PAINT_USERS": [], # If this is empty it will not allow anyone, except you, to use the paint command
 #     "ALLOWED_VIDEO_USERS": [], # If this is empty it will not allow anyone, except you, to use the video command
-#     "ALLOWED_SONG_USERS": [] # If this is empty it will not allow anyone, except you, to use the song command
+#     "ALLOWED_SONG_USERS": [], # If this is empty it will not allow anyone, except you, to use the song command
+#     "ACTIVE_MODEL": "gemini-2.5-flash" # The active text generation model
 # }
 
 def load_config():
@@ -44,7 +45,8 @@ def load_config():
         "BANNED_USERS": [],
         "ALLOWED_PAINT_USERS": [],
         "ALLOWED_VIDEO_USERS": [],
-        "ALLOWED_SONG_USERS": []
+        "ALLOWED_SONG_USERS": [],
+        "ACTIVE_MODEL": "gemini-2.5-flash"
     }
     
     if not os.path.exists(CONFIG_FILE):
@@ -104,7 +106,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"Failed to initialize Lyria Client: {e}")
 
-bot = commands.Bot(command_prefix="!", self_bot=True)
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, self_bot=True)
 
 AI_MARKER = "\u200b\u200c"
 
@@ -147,6 +149,7 @@ async def on_ready():
     print(f'Use {COMMAND_PREFIX}forget to delete every memory')
     print(f'Use {COMMAND_PREFIX}byebye to stop the bot')
     print(f'Use {COMMAND_PREFIX}refresh to refresh the bot')
+    print(f'Use {COMMAND_PREFIX}models list/set <model> to manage the active text model')
     print(f'Use {COMMAND_PREFIX}paint <prompt> to make a image')
     print(f'Use {COMMAND_PREFIX}video <prompt> to make a video')
     print(f'Use {COMMAND_PREFIX}song <prompt> to make a song')
@@ -171,7 +174,6 @@ async def on_ready():
 async def on_message(message):
     global last_response_time
 
-    # Use config_data dynamically so commands like !ban take effect immediately
     if message.author.id in config_data.get("BANNED_USERS", []):
         return
 
@@ -241,7 +243,6 @@ async def on_message(message):
                 clean_content = hist_msg.content.replace(AI_MARKER, '')
                 clean_content = clean_content.replace(f'<@{bot.user.id}>', f'@{bot.user.name}').replace(f'<@!{bot.user.id}>', f'@{bot.user.name}')
                 
-                # Strip the !self command from chat history context so AI doesn't get confused
                 if clean_content.startswith(f"{COMMAND_PREFIX}self "):
                     clean_content = clean_content[len(f"{COMMAND_PREFIX}self "):].strip()
                     
@@ -315,8 +316,11 @@ async def on_message(message):
             if sys_instruct:
                 config_kwargs['config'] = types.GenerateContentConfig(system_instruction=sys_instruct)
 
+            # Retrieve active model from config (fallback to 2.5-flash)
+            active_model = config_data.get("ACTIVE_MODEL", "gemini-2.5-flash")
+
             response = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
+                model=active_model,
                 contents=contents_list,
                 **config_kwargs
             )
@@ -422,7 +426,7 @@ async def process_paint_request(message, prompt: str):
         )
         
         if result.generated_images is None:
-            if msg: await msg.edit(content="Nah fam, API didn't return an image (prompt might be blocked 💀).")
+            if msg: await msg.edit(content="Nah fam, API didn't return an image (prompt might be blocked 💀)." + AI_MARKER)
             return
             
         for generated_image in result.generated_images:
@@ -487,7 +491,7 @@ async def process_video_request(message, prompt: str):
                     await safe_reply(message, content=f"Bro the video is too big 😭 ({len(video_data)/(1024*1024):.2f}MB).\nDownload it or smth: {cloud_uri}")
                 break
         else:
-             if msg: await msg.edit(content="Nah fam, API didn't return any video (prompt might be blocked 💀).")
+             if msg: await msg.edit(content="Nah fam, API didn't return any video (prompt might be blocked 💀)." + AI_MARKER)
              
         try:
             if msg: await msg.delete()
@@ -545,7 +549,7 @@ async def process_song_request(message, prompt: str):
         await safe_reply(message, content=random.choice(ERROR_MSGS).format(e=e))
 
 # ---------------------------------------------------------
-# BOT COMMANDS (CONFIG MANAGEMENT & OTHERS)
+# BOT COMMANDS
 # ---------------------------------------------------------
 
 async def handle_list_toggle(ctx, list_key: str, action_name: str, add: bool):
@@ -613,6 +617,40 @@ async def addsong(ctx):
 async def rmsong(ctx):
     await handle_list_toggle(ctx, "ALLOWED_SONG_USERS", "allowed to song", add=False)
 
+# --- NEW MODELS COMMAND ---
+@bot.command()
+async def models(ctx, action: str = None, model_name: str = None):
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+    active = config_data.get("ACTIVE_MODEL", "gemini-2.5-flash")
+
+    if action == "list":
+        try:
+            api_models = await gemini_client.aio.models.list()
+            names = sorted(list(set([m.name.split('/')[-1] for m in api_models if "gemini" in m.name.lower()])))
+            
+            msg = "**Available Models from Vertex:**\n"
+            for m in names:
+                marker = " (Active)" if m == active else ""
+                msg += f"- `{m}`{marker}\n"
+            await ctx.send(msg + AI_MARKER, delete_after=15)
+        except Exception as e:
+            await ctx.send(f"Error fetching models: {e}" + AI_MARKER, delete_after=5)
+        
+    elif action == "set":
+        if not model_name:
+            await ctx.send(f"You gotta specify a model name! Like: `{COMMAND_PREFIX}models set gemini-2.5-pro`" + AI_MARKER, delete_after=5)
+            return
+            
+        config_data["ACTIVE_MODEL"] = model_name
+        save_config()
+        await ctx.send(f"Active model set to `{model_name}`" + AI_MARKER, delete_after=5)
+        
+    else:
+        await ctx.send(f"Usage:\n`{COMMAND_PREFIX}models list` -> Shows available models\n`{COMMAND_PREFIX}models set <model>` -> Changes active model" + AI_MARKER, delete_after=8)
 
 @bot.command()
 async def song(ctx, *, prompt: str = None):
