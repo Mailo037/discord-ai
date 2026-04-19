@@ -72,7 +72,7 @@ CONFIG_FILE = "config.json"
 #     "ACTIVE_MODEL": "gemini-2.5-flash", # The active text generation model for Vertex/Gemini
 #     "ACTIVE_OLLAMA_MODEL": "llama3.2", # The active text generation model for local Ollama
 #     "AI_BACKEND": "gemini", # Toggle between "gemini" and "ollama"
-#     "FEATURES": {"IMAGE_ENABLED": True, "VIDEO_ENABLED": True, "SONG_ENABLED": True} # Global toggles
+#     "FEATURES": {"IMAGE_ENABLED": true, "VIDEO_ENABLED": true, "SONG_ENABLED": true} # Global toggles
 # }
 
 def load_config():
@@ -421,7 +421,7 @@ async def on_message(message):
 
         sys_instruct += "\n\nIMPORTANT: You have long-term memory! Check the provided [GLOBAL MEMORY] and [USER SPECIFIC MEMORY] above. Do NOT store a fact if it is already there. Only store NEW and IMPORTANT information.\n"
         sys_instruct += "- For global facts: append [GLOBALMEM: fact to store].\n"
-        sys_instruct += "- For facts about the current user: append [USERMEM: fact to store].\n"
+        sys_instruct += "- For facts about the current user: append [USERMEM: fact to store], do NOT save a new fact if its too close to an existing fact.\n"
         sys_instruct += "Only use these tags at the very end of your response."
 
         can_image = features.get("IMAGE_ENABLED", True) and message.author.id in config_data.get("ALLOWED_IMAGE_USERS", [])
@@ -637,7 +637,13 @@ async def process_video_request(message, prompt: str):
             op = await gemini_client.aio.operations.get(operation=op)
             
         if op.error:
-            if msg: await msg.edit(content=f"Nah fam, API threw an error: {op.error.message}" + AI_MARKER)
+            err_msg = str(op.error)
+            if isinstance(op.error, dict):
+                err_msg = op.error.get('message', str(op.error))
+            elif hasattr(op.error, 'message'):
+                err_msg = op.error.message
+            
+            if msg: await msg.edit(content=f"Nah fam, API threw an error: {err_msg}" + AI_MARKER)
             return
             
         final_result = getattr(op, 'result', getattr(op, 'response', None))
@@ -693,7 +699,7 @@ async def process_song_request(message, prompt: str):
         
         audio_data = None
         lyrics_parts = []
-        for part in response.parts:
+        for part in (response.parts or []):
             if part.text is not None:
                 lyrics_parts.append(part.text)
             elif part.inline_data is not None:
@@ -777,7 +783,7 @@ async def unban(ctx):
     await handle_list_toggle(ctx, "BANNED_USERS", "banned", add=False)
 
 @user.command()
-async def allow(ctx, perm_type: str = None):
+async def allow(ctx, target: discord.Member = None, perm_type: str = None):
     if not perm_type or perm_type.lower() not in ["image", "video", "song"]:
         await ctx.send(f"Specify what to allow: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
         return
@@ -785,7 +791,7 @@ async def allow(ctx, perm_type: str = None):
     await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=True)
 
 @user.command()
-async def deny(ctx, perm_type: str = None):
+async def deny(ctx, target: discord.Member = None, perm_type: str = None):
     if not perm_type or perm_type.lower() not in ["image", "video", "song"]:
         await ctx.send(f"Specify what to deny: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
         return
@@ -861,7 +867,7 @@ async def models(ctx, action: str = None, model_name: str = None):
                     async with session.get("http://localhost:11434/api/tags") as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            names = [m["name"] for m in data.get("models", [])]
+                            names = [m["name"] for m in (data.get("models") or [])]
                             
                             msg = "**Available Local Models (Ollama):**\n"
                             for m in names:
