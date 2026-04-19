@@ -1,0 +1,4 @@
+discord.py-self==2.1.0
+python-dotenv==1.2.2
+google-genai==1.73.1
+aiohttp

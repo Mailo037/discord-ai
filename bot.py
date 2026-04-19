@@ -1,14 +1,29 @@
+import sys
+import subprocess
+import os
+
+# --- AUTOMATIC REQUIREMENTS INSTALLATION ---
+def install_requirements():
+    req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+    if os.path.exists(req_file):
+        print("Checking/Installing dependencies... (this might take a second)")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", req_file])
+        except Exception as e:
+            print(f"Note: Auto-install skipped or failed: {e}")
+
+install_requirements()
+
 import discord
 from discord.ext import commands
 import io
 import re
-import os
 import time
-import sys
 import asyncio
 import json
 import aiohttp
 import random
+import base64
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -22,7 +37,7 @@ COMMAND_PREFIX = "!"
 
 load_dotenv()
 # This is what you HAVE to have in the .env file:
-#   GEMINI_API_KEY=your_api_key_here
+#   GEMINI_API_KEY=your_api_key_here (optional)
 #   DISCORD_TOKEN=your_discord_token_here
 # You can get your API key from AI Studio: https://aistudio.google.com/api-keys (This will only be used when prompted to generate a Song)
 
@@ -32,10 +47,13 @@ CONFIG_FILE = "config.json"
 #     "ALLOWED_CHANNELS": [], # If this is empty it will react to every message in every channel
 #     "COOLDOWN_SECONDS": 5,
 #     "BANNED_USERS": [],
-#     "ALLOWED_PAINT_USERS": [], # If this is empty it will not allow anyone, except you, to use the paint command
+#     "ALLOWED_IMAGE_USERS": [], # If this is empty it will not allow anyone, except you, to use the image command
 #     "ALLOWED_VIDEO_USERS": [], # If this is empty it will not allow anyone, except you, to use the video command
 #     "ALLOWED_SONG_USERS": [], # If this is empty it will not allow anyone, except you, to use the song command
-#     "ACTIVE_MODEL": "gemini-2.5-flash" # The active text generation model
+#     "ACTIVE_MODEL": "gemini-2.5-flash", # The active text generation model for Vertex/Gemini
+#     "ACTIVE_OLLAMA_MODEL": "llama3.2", # The active text generation model for local Ollama
+#     "AI_BACKEND": "gemini", # Toggle between "gemini" and "ollama"
+#     "FEATURES": {"IMAGE_ENABLED": True, "VIDEO_ENABLED": True, "SONG_ENABLED": True} # Global toggles
 # }
 
 def load_config():
@@ -43,10 +61,17 @@ def load_config():
         "ALLOWED_CHANNELS": [],
         "COOLDOWN_SECONDS": 5,
         "BANNED_USERS": [],
-        "ALLOWED_PAINT_USERS": [],
+        "ALLOWED_IMAGE_USERS": [],
         "ALLOWED_VIDEO_USERS": [],
         "ALLOWED_SONG_USERS": [],
-        "ACTIVE_MODEL": "gemini-2.5-flash"
+        "ACTIVE_MODEL": "gemini-2.5-flash",
+        "ACTIVE_OLLAMA_MODEL": "llama3.2",
+        "AI_BACKEND": "gemini",
+        "FEATURES": {
+            "IMAGE_ENABLED": True,
+            "VIDEO_ENABLED": True,
+            "SONG_ENABLED": True
+        }
     }
     
     if not os.path.exists(CONFIG_FILE):
@@ -74,12 +99,18 @@ def save_config():
     except Exception as e:
         print(f"Failed to save config: {e}")
 
-ALLOWED_CHANNELS = config_data.get("ALLOWED_CHANNELS", [])
-COOLDOWN_SECONDS = config_data.get("COOLDOWN_SECONDS", 5)
-BANNED_USERS = config_data.get("BANNED_USERS", [])
-ALLOWED_PAINT_USERS = config_data.get("ALLOWED_PAINT_USERS", [])
-ALLOWED_VIDEO_USERS = config_data.get("ALLOWED_VIDEO_USERS", [])
-ALLOWED_SONG_USERS = config_data.get("ALLOWED_SONG_USERS", [])
+if "ALLOWED_PAINT_USERS" in config_data:
+    config_data["ALLOWED_IMAGE_USERS"] = config_data.pop("ALLOWED_PAINT_USERS")
+    save_config()
+if "FEATURES" not in config_data:
+    config_data["FEATURES"] = {"IMAGE_ENABLED": True, "VIDEO_ENABLED": True, "SONG_ENABLED": True}
+    save_config()
+if "AI_BACKEND" not in config_data:
+    config_data["AI_BACKEND"] = "gemini"
+    save_config()
+if "ACTIVE_OLLAMA_MODEL" not in config_data:
+    config_data["ACTIVE_OLLAMA_MODEL"] = "llama3.2"
+    save_config()
 
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "vertex-credentials.json")
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILE
@@ -127,17 +158,57 @@ async def safe_reply(message, content=None, **kwargs):
         print(f"Unexpected error in safe_reply: {e}")
         return None
 
-PAINT_START_MSGS = ["Lemme paint ts 😭🙏", "Hold on, cooking up a masterpiece 👨‍🎨", "Generating your image blud... ⏳", "Gotchu, drawing this rn 🖌️"]
-PAINT_DONE_MSGS = ["Heres yo image blud 🤑", "Ts goes hard ngl 🔥", "Done painting this for u 🎨", "Masterpiece completed 🖼️"]
+IMAGE_START_MSGS = [
+    "Lemme paint ts 😭🙏", "Hold on, cooking up a masterpiece 👨‍🎨", 
+    "Generating your image blud... ⏳", "Gotchu, drawing this rn 🖌️",
+    "Say less, painting it right now 🎨", "AI canvas is warming up 🖼️",
+    "Aight, finna turn into Picasso 🧑‍🎨", "Hold up, let me visualize this 🧠"
+]
+IMAGE_DONE_MSGS = [
+    "Heres yo image blud 🤑", "Ts goes hard ngl 🔥", "Done painting this for u 🎨", 
+    "Masterpiece completed 🖼️", "Fresh out the AI oven 🥖",
+    "Look at this perfection 🤌", "Bro this actually looks insane 💀"
+]
 
-VIDEO_START_MSGS = ["Lemme cook up this video ts 🎬 (this takes some minutes)", "Directing your movie rn 🎥 (gimme a few mins)", "Generating video... grab some popcorn 🍿", "Cooking up the visuals, hold tight 🎞️"]
-VIDEO_DONE_MSGS = ["Here is your video blud 🎥", "Movie is ready, ts is crazy 🎬", "Done rendering your clip 🎞️", "Here you go, Spielberg 🍿"]
-VIDEO_LARGE_MSGS = ["Video generated but it is large. Downloading from Cloud URI... ⏳", "File is massive, pulling it from the cloud rn ☁️", "Hold on, downloading the big file... 📡"]
+VIDEO_START_MSGS = [
+    "Lemme cook up this video ts 🎬 (this takes some minutes)", 
+    "Directing your movie rn 🎥 (gimme a few mins)", 
+    "Generating video... grab some popcorn 🍿", 
+    "Cooking up the visuals, hold tight 🎞️",
+    "Action! AI is rendering the scene 📽️",
+    "Patience blud, making a whole movie here 🎬"
+]
+VIDEO_DONE_MSGS = [
+    "Here is your video blud 🎥", "Movie is ready, ts is crazy 🎬", 
+    "Done rendering your clip 🎞️", "Here you go, Spielberg 🍿",
+    "Ts belongs in a cinema 🎞️", "Final cut is ready 🔥"
+]
+VIDEO_LARGE_MSGS = [
+    "Video generated but it is large. Downloading from Cloud URI... ⏳", 
+    "File is massive, pulling it from the cloud rn ☁️", 
+    "Hold on, downloading the big file... 📡",
+    "Ts too heavy, fetching from server 🏋️‍♂️"
+]
 
-SONG_START_MSGS = ["Lemme cook up this song 🎵 (hold on)", "Producing your track rn 🎧 (wait a sec)", "Making beats for you... 🎹", "Tuning the instruments, gimme a sec 🎸"]
-SONG_DONE_MSGS = ["Here is your song blud 🎶", "Track is ready, ts is a banger 🎧", "Done producing your audio 🔊", "Grammy winning track right here 🏆"]
+SONG_START_MSGS = [
+    "Lemme cook up this song 🎵 (hold on)", 
+    "Producing your track rn 🎧 (wait a sec)", 
+    "Making beats for you... 🎹", 
+    "Tuning the instruments, gimme a sec 🎸",
+    "Finna drop a platinum hit 💿",
+    "Studio time, let me cook 🎙️"
+]
+SONG_DONE_MSGS = [
+    "Here is your song blud 🎶", "Track is ready, ts is a banger 🎧", 
+    "Done producing your audio 🔊", "Grammy winning track right here 🏆",
+    "Straight out the AI studio 🎙️", "This beat goes crazy 🔥"
+]
 
-ERROR_MSGS = ["Nah fam, ts was too hard: {e}", "Bro broke the API: {e} 💀", "My bad gng, error: {e} 🥀", "Aint no way, something failed: {e} 📉"]
+ERROR_MSGS = [
+    "Nah fam, ts was too hard: {e}", "Bro broke the API: {e} 💀", 
+    "My bad gng, error: {e} 🥀", "Aint no way, something failed: {e} 📉",
+    "I'm cooked, got an error: {e} 😭", "The matrix broke: {e} 🛑"
+]
 
 @bot.event
 async def on_ready():
@@ -145,18 +216,19 @@ async def on_ready():
     print('--------------------------------------------------')
     print(f'Prefix is set to: {COMMAND_PREFIX}')
     print(f'Use {COMMAND_PREFIX}self <prompt> to talk to the ai (the bot will ignore self pings)')
+    print(f'Use {COMMAND_PREFIX}backend [gemini/ollama] to switch AI engines')
+    print(f'Use {COMMAND_PREFIX}models list/set <model> to manage the active text model')
     print(f'Use {COMMAND_PREFIX}remember <user?> <text> to save a fact about a user or into global memories')
     print(f'Use {COMMAND_PREFIX}forget to delete every memory')
     print(f'Use {COMMAND_PREFIX}byebye to stop the bot')
     print(f'Use {COMMAND_PREFIX}refresh to refresh the bot')
-    print(f'Use {COMMAND_PREFIX}models list/set <model> to manage the active text model')
-    print(f'Use {COMMAND_PREFIX}paint <prompt> to make a image')
+    print(f'Use {COMMAND_PREFIX}image <prompt> to make a image')
     print(f'Use {COMMAND_PREFIX}video <prompt> to make a video')
     print(f'Use {COMMAND_PREFIX}song <prompt> to make a song')
-    print(f'Use {COMMAND_PREFIX}ban/unban <user> to ban/unban a user')
-    print(f'Use {COMMAND_PREFIX}addpaint/rmpaint <user> to add/remove a user from the allowed paint list')
-    print(f'Use {COMMAND_PREFIX}addvideo/rmvideo <user> to add/remove a user from the allowed video list')
-    print(f'Use {COMMAND_PREFIX}addsong/rmsong <user> to add/remove a user from the allowed song list')
+    print(f'Use {COMMAND_PREFIX}user info <@user> to check a users permissions')
+    print(f'Use {COMMAND_PREFIX}user ban/unban <@user> to manage bans')
+    print(f'Use {COMMAND_PREFIX}user allow/deny <@user> [image/video/song] to manage feature access')
+    print(f'Use {COMMAND_PREFIX}toggle [image/video/song] to enable/disable features globally')
     print('--------------------------------------------------')
     
     if os.path.exists("refresh_channel.txt"):
@@ -177,6 +249,28 @@ async def on_message(message):
     if message.author.id in config_data.get("BANNED_USERS", []):
         return
 
+    features = config_data.get("FEATURES", {})
+    backend = config_data.get("AI_BACKEND", "gemini")
+
+    if message.content.lower().startswith(f"{COMMAND_PREFIX}user info"):
+        target = message.author
+        if message.mentions and message.author.id == bot.user.id:
+            target = message.mentions[0]
+        
+        is_banned = target.id in config_data.get("BANNED_USERS", [])
+        can_img = target.id in config_data.get("ALLOWED_IMAGE_USERS", [])
+        can_vid = target.id in config_data.get("ALLOWED_VIDEO_USERS", [])
+        can_sng = target.id in config_data.get("ALLOWED_SONG_USERS", [])
+        
+        msg = f"**User Info for {target.name}** 👤\n"
+        msg += f"**Banned:** {'Yes' if is_banned else 'No'}\n"
+        msg += f"**Image Gen:** {'Allowed' if can_img else 'Denied'}\n"
+        msg += f"**Video Gen:** {'Allowed' if can_vid else 'Denied'}\n"
+        msg += f"**Song Gen:** {'Allowed' if can_sng else 'Denied'}"
+        
+        await safe_reply(message, content=msg, delete_after=5)
+        return
+
     is_self_cmd = message.content.startswith(f"{COMMAND_PREFIX}self ")
 
     if message.author == bot.user and not is_self_cmd:
@@ -187,20 +281,28 @@ async def on_message(message):
     if allowed_channels and message.channel.id not in allowed_channels:
         return
 
-    # Check for direct text commands handled without the framework
-    if message.content.startswith(f"{COMMAND_PREFIX}paint ") and message.author.id in config_data.get("ALLOWED_PAINT_USERS", []):
-        prompt = message.content[len(f"{COMMAND_PREFIX}paint "):].strip()
+    if message.content.startswith(f"{COMMAND_PREFIX}image ") and message.author.id in config_data.get("ALLOWED_IMAGE_USERS", []):
+        if not features.get("IMAGE_ENABLED", True):
+            await safe_reply(message, content="Cant create an image rn. 🛑")
+            return
+        prompt = message.content[len(f"{COMMAND_PREFIX}image "):].strip()
         if prompt:
-            await process_paint_request(message, prompt)
+            await process_image_request(message, prompt)
             return
 
     if message.content.startswith(f"{COMMAND_PREFIX}video ") and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", []):
+        if not features.get("VIDEO_ENABLED", True):
+            await safe_reply(message, content="Cant create a video rn. 🛑")
+            return
         prompt = message.content[len(f"{COMMAND_PREFIX}video "):].strip()
         if prompt:
             await process_video_request(message, prompt)
             return
 
     if message.content.startswith(f"{COMMAND_PREFIX}song ") and message.author.id in config_data.get("ALLOWED_SONG_USERS", []):
+        if not features.get("SONG_ENABLED", True):
+            await safe_reply(message, content="Cant create a song rn. 🛑")
+            return
         prompt = message.content[len(f"{COMMAND_PREFIX}song "):].strip()
         if prompt:
             await process_song_request(message, prompt)
@@ -214,181 +316,238 @@ async def on_message(message):
     if current_time - last_response_time < config_data.get("COOLDOWN_SECONDS", 5):
         return
     
-    if gemini_client:
-        if is_self_cmd:
-            user_msg = message.content[len(f"{COMMAND_PREFIX}self "):].strip()
-        else:
-            user_msg = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
-            
-        if not user_msg:
-            return
-            
-        context = f"[METADATA]\n"
-        context += f"Sender: {message.author.display_name} (Username: {message.author.name})\n"
-        if message.guild:
-            context += f"Server: {message.guild.name} | Channel: {message.channel.name}\n"
-        else:
-            context += "Location: Direct Message\n"
-        context += f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    if is_self_cmd:
+        user_msg = message.content[len(f"{COMMAND_PREFIX}self "):].strip()
+    else:
+        user_msg = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
         
-        chat_history = ""
-        try:
-            history_msgs = []
-            async for hist_msg in message.channel.history(limit=message_context_limit + 1, before=message):
-                history_msgs.append(hist_msg)
-            history_msgs.reverse()
+    if not user_msg:
+        return
+        
+    context = f"[METADATA]\n"
+    context += f"Sender: {message.author.display_name} (Username: {message.author.name})\n"
+    if message.guild:
+        context += f"Server: {message.guild.name} | Channel: {message.channel.name}\n"
+    else:
+        context += "Location: Direct Message\n"
+    context += f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    
+    chat_history = ""
+    try:
+        history_msgs = []
+        async for hist_msg in message.channel.history(limit=message_context_limit + 1, before=message):
+            history_msgs.append(hist_msg)
+        history_msgs.reverse()
+        
+        for hist_msg in history_msgs:
+            author_name = hist_msg.author.display_name
+            clean_content = hist_msg.content.replace(AI_MARKER, '')
+            clean_content = clean_content.replace(f'<@{bot.user.id}>', f'@{bot.user.name}').replace(f'<@!{bot.user.id}>', f'@{bot.user.name}')
             
-            for hist_msg in history_msgs:
-                author_name = hist_msg.author.display_name
-                clean_content = hist_msg.content.replace(AI_MARKER, '')
-                clean_content = clean_content.replace(f'<@{bot.user.id}>', f'@{bot.user.name}').replace(f'<@!{bot.user.id}>', f'@{bot.user.name}')
+            if clean_content.startswith(f"{COMMAND_PREFIX}self "):
+                clean_content = clean_content[len(f"{COMMAND_PREFIX}self "):].strip()
                 
-                if clean_content.startswith(f"{COMMAND_PREFIX}self "):
-                    clean_content = clean_content[len(f"{COMMAND_PREFIX}self "):].strip()
-                    
-                if clean_content.strip():
-                    chat_history += f"{author_name}: {clean_content}\n"
-        except:
-            pass
+            if clean_content.strip():
+                chat_history += f"{author_name}: {clean_content}\n"
+    except:
+        pass
+    
+    if chat_history:
+        context += f"[RECENT CHAT HISTORY]\n{chat_history}\n"
+    
+    prompt = f"{context}[CURRENT MESSAGE]\n{user_msg}"
+    
+    last_response_time = current_time
         
-        if chat_history:
-            context += f"[RECENT CHAT HISTORY]\n{chat_history}\n"
+    try:
+        avatar_bytes = None
+        avatar_mime = "image/png"
+        if message.author.avatar:
+            avatar_bytes = await message.author.avatar.read()
+            avatar_mime = "image/gif" if message.author.avatar.is_animated() else "image/png"
+        elif message.author.default_avatar:
+            avatar_bytes = await message.author.default_avatar.read()
         
-        prompt = f"{context}[CURRENT MESSAGE]\n{user_msg}"
+        att_bytes_list = []
+        for attachment in message.attachments:
+            if attachment.content_type and ("image" in attachment.content_type or "video" in attachment.content_type):
+                try:
+                    b = await attachment.read()
+                    att_bytes_list.append({"bytes": b, "mime": attachment.content_type})
+                except:
+                    pass
         
-        last_response_time = current_time
-            
-        try:
-            contents_list = []
-            
-            avatar_bytes = None
-            avatar_mime = "image/png"
-            if message.author.avatar:
-                avatar_bytes = await message.author.avatar.read()
-                avatar_mime = "image/gif" if message.author.avatar.is_animated() else "image/png"
-            elif message.author.default_avatar:
-                avatar_bytes = await message.author.default_avatar.read()
-            
-            if avatar_bytes:
-                contents_list.append(types.Part.from_bytes(data=avatar_bytes, mime_type=avatar_mime))
-                
-            for attachment in message.attachments:
-                if attachment.content_type and ("image" in attachment.content_type or "video" in attachment.content_type):
-                    try:
-                        att_bytes = await attachment.read()
-                        contents_list.append(types.Part.from_bytes(data=att_bytes, mime_type=attachment.content_type))
-                    except:
-                        pass
-            
-            contents_list.append(prompt)
-            
-            sys_instruct = ""
-            if os.path.exists("instructions.txt"):
-                with open("instructions.txt", "r", encoding="utf-8") as f:
-                    sys_instruct = f.read().strip()
-            
-            if os.path.exists("global_memory.txt"):
-                with open("global_memory.txt", "r", encoding="utf-8") as f:
-                    memory_data = f.read().strip()
-                if memory_data:
-                    sys_instruct += "\n\n[GLOBAL MEMORY]:\n" + memory_data
+        sys_instruct = ""
+        if os.path.exists("instructions.txt"):
+            with open("instructions.txt", "r", encoding="utf-8") as f:
+                sys_instruct = f.read().strip()
+        
+        if os.path.exists("global_memory.txt"):
+            with open("global_memory.txt", "r", encoding="utf-8") as f:
+                memory_data = f.read().strip()
+            if memory_data:
+                sys_instruct += "\n\n[GLOBAL MEMORY]:\n" + memory_data
 
+        user_id_str = str(message.author.id)
+        if os.path.exists("user_memories.json"):
+            try:
+                with open("user_memories.json", "r", encoding="utf-8") as f:
+                    all_users_mem = json.load(f)
+                if user_id_str in all_users_mem and all_users_mem[user_id_str]:
+                    sys_instruct += "\n\n[USER SPECIFIC MEMORY (" + message.author.name + ")]:\n"
+                    for fact in all_users_mem[user_id_str]:
+                        sys_instruct += f"- {fact}\n"
+            except:
+                pass
+
+        sys_instruct += "\n\nIMPORTANT: You have long-term memory! Check the provided [GLOBAL MEMORY] and [USER SPECIFIC MEMORY] above. Do NOT store a fact if it is already there. Only store NEW and IMPORTANT information.\n"
+        sys_instruct += "- For global facts: append [GLOBALMEM: fact to store].\n"
+        sys_instruct += "- For facts about the current user: append [USERMEM: fact to store].\n"
+        sys_instruct += "Only use these tags at the very end of your response."
+
+        can_image = features.get("IMAGE_ENABLED", True) and message.author.id in config_data.get("ALLOWED_IMAGE_USERS", [])
+        can_video = features.get("VIDEO_ENABLED", True) and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", [])
+        can_song = features.get("SONG_ENABLED", True) and message.author.id in config_data.get("ALLOWED_SONG_USERS", [])
+
+        if can_image or can_video or can_song:
+            sys_instruct += "\n\nAUTO-MEDIA GENERATION: You can generate media for the user! Only use these tags when EXPLICITLY requested by the user:\n"
+            if can_image:
+                sys_instruct += "- For images: [IMAGE: detailed image prompt in english]\n"
+            if can_video:
+                sys_instruct += "- For videos: [VIDEO: detailed video prompt in english]\n"
+            if can_song:
+                sys_instruct += "- For songs: [SONG: detailed song/music prompt in english]\n"
+            sys_instruct += "Example: if user says 'male mir eine katze', respond normally and add [IMAGE: a cute fluffy cat sitting on a pillow] at the very end.\nOnly use ONE media tag per message."
+
+        reply_text = ""
+
+        if backend == "ollama":
+            ollama_url = "http://localhost:11434/api/chat"
+            messages = []
+            
+            if sys_instruct:
+                messages.append({"role": "system", "content": sys_instruct})
+                
+            b64_images = []
+            if avatar_bytes:
+                b64_images.append(base64.b64encode(avatar_bytes).decode('utf-8'))
+            for att in att_bytes_list:
+                if "image" in att["mime"]:
+                    b64_images.append(base64.b64encode(att["bytes"]).decode('utf-8'))
+
+            user_payload = {"role": "user", "content": prompt}
+            if b64_images:
+                user_payload["images"] = b64_images
+                
+            messages.append(user_payload)
+            
+            active_ollama_model = config_data.get("ACTIVE_OLLAMA_MODEL", "llama3.2")
+            payload = {
+                "model": active_ollama_model,
+                "messages": messages,
+                "stream": False
+            }
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(ollama_url, json=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            reply_text = data.get("message", {}).get("content", "")
+                        else:
+                            reply_text = f"Ollama Error ({resp.status}): Make sure Ollama is running and model '{active_ollama_model}' is pulled."
+            except aiohttp.ClientConnectorError:
+                reply_text = "Connection refused: Ollama is not running on localhost:11434 🛑"
+            except Exception as e:
+                reply_text = f"Local Ollama failed: {e}"
+                
+        else:
+            if not gemini_client:
+                reply_text = "Vertex AI Client is not initialized."
+            else:
+                contents_list = []
+                if avatar_bytes:
+                    contents_list.append(types.Part.from_bytes(data=avatar_bytes, mime_type=avatar_mime))
+                for att in att_bytes_list:
+                    contents_list.append(types.Part.from_bytes(data=att["bytes"], mime_type=att["mime"]))
+                
+                contents_list.append(prompt)
+                
+                config_kwargs = {}
+                if sys_instruct:
+                    config_kwargs['config'] = types.GenerateContentConfig(system_instruction=sys_instruct)
+
+                active_model = config_data.get("ACTIVE_MODEL", "gemini-2.5-flash")
+
+                response = await gemini_client.aio.models.generate_content(
+                    model=active_model,
+                    contents=contents_list,
+                    **config_kwargs
+                )
+                reply_text = response.text
+
+        global_mems = re.findall(r'\[GLOBALMEM:\s*(.*?)\]', reply_text)
+        if global_mems:
+            existing_global = []
+            if os.path.exists("global_memory.txt"):
+                try:
+                    with open("global_memory.txt", "r", encoding="utf-8") as f:
+                        existing_global = [line.strip().lstrip("- ").strip() for line in f.readlines()]
+                except:
+                    pass
+            
+            with open("global_memory.txt", "a", encoding="utf-8") as f:
+                for mem in global_mems:
+                    m_strip = mem.strip()
+                    if m_strip and m_strip not in existing_global:
+                        f.write(f"- {m_strip}\n")
+                        existing_global.append(m_strip)
+            reply_text = re.sub(r'\[GLOBALMEM:\s*.*?\]', '', reply_text).strip()
+
+        user_mems = re.findall(r'\[USERMEM:\s*(.*?)\]', reply_text)
+        if user_mems:
             user_id_str = str(message.author.id)
+            all_users_mem = {}
             if os.path.exists("user_memories.json"):
                 try:
                     with open("user_memories.json", "r", encoding="utf-8") as f:
                         all_users_mem = json.load(f)
-                    if user_id_str in all_users_mem and all_users_mem[user_id_str]:
-                        sys_instruct += "\n\n[USER SPECIFIC MEMORY (" + message.author.name + ")]:\n"
-                        for fact in all_users_mem[user_id_str]:
-                            sys_instruct += f"- {fact}\n"
                 except:
                     pass
-
-            sys_instruct += "\n\nIMPORTANT: You have long-term memory! Check the provided [GLOBAL MEMORY] and [USER SPECIFIC MEMORY] above. Do NOT store a fact if it is already there. Only store NEW and IMPORTANT information.\n"
-            sys_instruct += "- For global facts: append [GLOBALMEM: fact to store].\n"
-            sys_instruct += "- For facts about the current user: append [USERMEM: fact to store].\n"
-            sys_instruct += "Only use these tags at the very end of your response."
-
-            sys_instruct += "\n\nAUTO-MEDIA GENERATION: You can generate media for the user! If the user asks you to create/generate/make an image, a video, or a song/music, append the corresponding tag at the VERY END of your answer (after any MEM tags). Only use these when the user EXPLICITLY asks for media creation:\n- For images: [PAINT: detailed image prompt in english]\n- For videos: [VIDEO: detailed video prompt in english]\n- For songs: [SONG: detailed song/music prompt in english]\nExample: if user says 'male mir eine katze', respond normally and add [PAINT: a cute fluffy cat sitting on a pillow]\nDo NOT use these tags unless the user clearly wants you to generate media. Only use ONE media tag per message."
-
-            config_kwargs = {}
-            if sys_instruct:
-                config_kwargs['config'] = types.GenerateContentConfig(system_instruction=sys_instruct)
-
-            # Retrieve active model from config (fallback to 2.5-flash)
-            active_model = config_data.get("ACTIVE_MODEL", "gemini-2.5-flash")
-
-            response = await gemini_client.aio.models.generate_content(
-                model=active_model,
-                contents=contents_list,
-                **config_kwargs
-            )
-            reply_text = response.text
             
-            global_mems = re.findall(r'\[GLOBALMEM:\s*(.*?)\]', reply_text)
-            if global_mems:
-                existing_global = []
-                if os.path.exists("global_memory.txt"):
-                    try:
-                        with open("global_memory.txt", "r", encoding="utf-8") as f:
-                            existing_global = [line.strip().lstrip("- ").strip() for line in f.readlines()]
-                    except:
-                        pass
-                
-                with open("global_memory.txt", "a", encoding="utf-8") as f:
-                    for mem in global_mems:
-                        m_strip = mem.strip()
-                        if m_strip and m_strip not in existing_global:
-                            f.write(f"- {m_strip}\n")
-                            existing_global.append(m_strip)
-                reply_text = re.sub(r'\[GLOBALMEM:\s*.*?\]', '', reply_text).strip()
-
-            user_mems = re.findall(r'\[USERMEM:\s*(.*?)\]', reply_text)
-            if user_mems:
-                user_id_str = str(message.author.id)
-                all_users_mem = {}
-                if os.path.exists("user_memories.json"):
-                    try:
-                        with open("user_memories.json", "r", encoding="utf-8") as f:
-                            all_users_mem = json.load(f)
-                    except:
-                        pass
-                
-                if user_id_str not in all_users_mem:
-                    all_users_mem[user_id_str] = []
-                
-                for mem in user_mems:
-                    m_strip = mem.strip()
-                    if m_strip and m_strip not in all_users_mem[user_id_str]:
-                        all_users_mem[user_id_str].append(m_strip)
-                
-                with open("user_memories.json", "w", encoding="utf-8") as f:
-                    json.dump(all_users_mem, f, indent=4)
-                    
-                reply_text = re.sub(r'\[USERMEM:\s*.*?\]', '', reply_text).strip()
+            if user_id_str not in all_users_mem:
+                all_users_mem[user_id_str] = []
             
-            paint_match = re.search(r'\[PAINT:\s*(.*?)\]', reply_text)
-            video_match = re.search(r'\[VIDEO:\s*(.*?)\]', reply_text)
-            song_match = re.search(r'\[SONG:\s*(.*?)\]', reply_text)
+            for mem in user_mems:
+                m_strip = mem.strip()
+                if m_strip and m_strip not in all_users_mem[user_id_str]:
+                    all_users_mem[user_id_str].append(m_strip)
             
-            if paint_match:
-                reply_text = re.sub(r'\[PAINT:\s*.*?\]', '', reply_text).strip()
-            if video_match:
-                reply_text = re.sub(r'\[VIDEO:\s*.*?\]', '', reply_text).strip()
-            if song_match:
-                reply_text = re.sub(r'\[SONG:\s*.*?\]', '', reply_text).strip()
+            with open("user_memories.json", "w", encoding="utf-8") as f:
+                json.dump(all_users_mem, f, indent=4)
                 
-        except Exception as e:
-            reply_text = random.choice(ERROR_MSGS).format(e=e)
-            paint_match = None
-            video_match = None
-            song_match = None
+            reply_text = re.sub(r'\[USERMEM:\s*.*?\]', '', reply_text).strip()
+        
+        image_match = re.search(r'\[IMAGE:\s*(.*?)\]', reply_text)
+        if not image_match:
+            image_match = re.search(r'\[PAINT:\s*(.*?)\]', reply_text)
             
-    else:
-        print("No Vertex AI Client found")
-        return
-    
+        video_match = re.search(r'\[VIDEO:\s*(.*?)\]', reply_text)
+        song_match = re.search(r'\[SONG:\s*(.*?)\]', reply_text)
+        
+        if image_match:
+            reply_text = re.sub(r'\[(?:IMAGE|PAINT):\s*.*?\]', '', reply_text).strip()
+        if video_match:
+            reply_text = re.sub(r'\[VIDEO:\s*.*?\]', '', reply_text).strip()
+        if song_match:
+            reply_text = re.sub(r'\[SONG:\s*.*?\]', '', reply_text).strip()
+            
+    except Exception as e:
+        reply_text = random.choice(ERROR_MSGS).format(e=e)
+        image_match = None
+        video_match = None
+        song_match = None
+        
     if reply_text:
         if len(reply_text) > 3900:
             file_obj = io.BytesIO(reply_text.encode('utf-8'))
@@ -397,24 +556,24 @@ async def on_message(message):
         else:
             await safe_reply(message, content=reply_text + AI_MARKER)
     
-    if paint_match and message.author.id in config_data.get("ALLOWED_PAINT_USERS", []):
-        asyncio.create_task(process_paint_request(message, paint_match.group(1)))
-    elif video_match and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", []):
+    if image_match and can_image:
+        asyncio.create_task(process_image_request(message, image_match.group(1)))
+    elif video_match and can_video:
         asyncio.create_task(process_video_request(message, video_match.group(1)))
-    elif song_match and message.author.id in config_data.get("ALLOWED_SONG_USERS", []):
+    elif song_match and can_song:
         asyncio.create_task(process_song_request(message, song_match.group(1)))
 
 # ---------------------------------------------------------
 # MEDIA PROCESSORS
 # ---------------------------------------------------------
 
-async def process_paint_request(message, prompt: str):
+async def process_image_request(message, prompt: str):
     if not gemini_client:
         print("No Gemini API Key found")
         return
 
     try:
-        msg = await safe_reply(message, content=random.choice(PAINT_START_MSGS))
+        msg = await safe_reply(message, content=random.choice(IMAGE_START_MSGS))
         
         result = await gemini_client.aio.models.generate_images(
             model='imagen-4.0-generate-001',
@@ -432,7 +591,7 @@ async def process_paint_request(message, prompt: str):
         for generated_image in result.generated_images:
             file_obj = io.BytesIO(generated_image.image.image_bytes)
             file = discord.File(file_obj, filename="bild.jpeg")
-            await safe_reply(message, content=random.choice(PAINT_DONE_MSGS), file=file)
+            await safe_reply(message, content=random.choice(IMAGE_DONE_MSGS), file=file)
             break
             
         try:
@@ -553,7 +712,6 @@ async def process_song_request(message, prompt: str):
 # ---------------------------------------------------------
 
 async def handle_list_toggle(ctx, list_key: str, action_name: str, add: bool):
-    """Helper command to add or remove users from config lists safely."""
     try:
         await ctx.message.delete()
     except:
@@ -585,39 +743,74 @@ async def handle_list_toggle(ctx, list_key: str, action_name: str, add: bool):
         else:
             await ctx.send(f"{user_name} is not {action_name} 💀" + AI_MARKER, delete_after=3)
 
-@bot.command()
+@bot.group(invoke_without_command=True)
+async def user(ctx):
+    try: await ctx.message.delete()
+    except: pass
+    await ctx.send(f"Usage:\n`{COMMAND_PREFIX}user info [@user]`\n`{COMMAND_PREFIX}user ban/unban <@user>`\n`{COMMAND_PREFIX}user allow/deny <@user> <image/video/song>`" + AI_MARKER, delete_after=10)
+
+@user.command()
 async def ban(ctx):
     await handle_list_toggle(ctx, "BANNED_USERS", "banned", add=True)
 
-@bot.command()
+@user.command()
 async def unban(ctx):
     await handle_list_toggle(ctx, "BANNED_USERS", "banned", add=False)
 
-@bot.command()
-async def addpaint(ctx):
-    await handle_list_toggle(ctx, "ALLOWED_PAINT_USERS", "allowed to paint", add=True)
+@user.command()
+async def allow(ctx, perm_type: str = None):
+    if not perm_type or perm_type.lower() not in ["image", "video", "song"]:
+        await ctx.send(f"Specify what to allow: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
+        return
+    list_key = f"ALLOWED_{perm_type.upper()}_USERS"
+    await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=True)
+
+@user.command()
+async def deny(ctx, perm_type: str = None):
+    if not perm_type or perm_type.lower() not in ["image", "video", "song"]:
+        await ctx.send(f"Specify what to deny: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
+        return
+    list_key = f"ALLOWED_{perm_type.upper()}_USERS"
+    await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=False)
+
 
 @bot.command()
-async def rmpaint(ctx):
-    await handle_list_toggle(ctx, "ALLOWED_PAINT_USERS", "allowed to paint", add=False)
+async def toggle(ctx, feature: str = None):
+    try: await ctx.message.delete()
+    except: pass
+    
+    valid_features = ["image", "video", "song"]
+    if not feature or feature.lower() not in valid_features:
+        await ctx.send(f"Specify what to toggle: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
+        return
+        
+    feat_key = f"{feature.upper()}_ENABLED"
+    features = config_data.setdefault("FEATURES", {})
+    
+    current_state = features.get(feat_key, True)
+    new_state = not current_state
+    
+    features[feat_key] = new_state
+    save_config()
+    
+    state_str = "ENABLED ✅" if new_state else "DISABLED 🛑"
+    await ctx.send(f"Global feature `{feature}` is now {state_str}" + AI_MARKER, delete_after=5)
 
 @bot.command()
-async def addvideo(ctx):
-    await handle_list_toggle(ctx, "ALLOWED_VIDEO_USERS", "allowed to video", add=True)
+async def backend(ctx, backend_name: str = None):
+    try: await ctx.message.delete()
+    except: pass
+    
+    valid = ["gemini", "ollama"]
+    if not backend_name or backend_name.lower() not in valid:
+        current = config_data.get("AI_BACKEND", "gemini")
+        await ctx.send(f"Current Backend: `{current}`\nUsage: `{COMMAND_PREFIX}backend [gemini|ollama]`" + AI_MARKER, delete_after=8)
+        return
+        
+    config_data["AI_BACKEND"] = backend_name.lower()
+    save_config()
+    await ctx.send(f"AI Backend switched to `{backend_name.lower()}` 🔄" + AI_MARKER, delete_after=5)
 
-@bot.command()
-async def rmvideo(ctx):
-    await handle_list_toggle(ctx, "ALLOWED_VIDEO_USERS", "allowed to video", add=False)
-
-@bot.command()
-async def addsong(ctx):
-    await handle_list_toggle(ctx, "ALLOWED_SONG_USERS", "allowed to song", add=True)
-
-@bot.command()
-async def rmsong(ctx):
-    await handle_list_toggle(ctx, "ALLOWED_SONG_USERS", "allowed to song", add=False)
-
-# --- NEW MODELS COMMAND ---
 @bot.command()
 async def models(ctx, action: str = None, model_name: str = None):
     try:
@@ -625,32 +818,57 @@ async def models(ctx, action: str = None, model_name: str = None):
     except:
         pass
 
-    active = config_data.get("ACTIVE_MODEL", "gemini-2.5-flash")
+    backend = config_data.get("AI_BACKEND", "gemini")
 
     if action == "list":
-        try:
-            api_models = await gemini_client.aio.models.list()
-            names = sorted(list(set([m.name.split('/')[-1] for m in api_models if "gemini" in m.name.lower()])))
-            
-            msg = "**Available Models from Vertex:**\n"
-            for m in names:
-                marker = " (Active)" if m == active else ""
-                msg += f"- `{m}`{marker}\n"
-            await ctx.send(msg + AI_MARKER, delete_after=15)
-        except Exception as e:
-            await ctx.send(f"Error fetching models: {e}" + AI_MARKER, delete_after=5)
+        if backend == "gemini":
+            active = config_data.get("ACTIVE_MODEL", "gemini-2.5-flash")
+            try:
+                api_models = await gemini_client.aio.models.list()
+                names = sorted(list(set([m.name.split('/')[-1] for m in api_models if "gemini" in m.name.lower()])))
+                
+                msg = "**Available Models from Vertex (Gemini):**\n"
+                for m in names:
+                    marker = " (Active)" if m == active else ""
+                    msg += f"- `{m}`{marker}\n"
+                await ctx.send(msg + AI_MARKER, delete_after=15)
+            except Exception as e:
+                await ctx.send(f"Error fetching Vertex models: {e}" + AI_MARKER, delete_after=5)
+                
+        elif backend == "ollama":
+            active = config_data.get("ACTIVE_OLLAMA_MODEL", "llama3.2")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get("http://localhost:11434/api/tags") as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            names = [m["name"] for m in data.get("models", [])]
+                            
+                            msg = "**Available Local Models (Ollama):**\n"
+                            for m in names:
+                                marker = " (Active)" if m == active else ""
+                                msg += f"- `{m}`{marker}\n"
+                            await ctx.send(msg + AI_MARKER, delete_after=15)
+                        else:
+                            await ctx.send("Ollama is not responding or not running locally 🛑" + AI_MARKER, delete_after=5)
+            except Exception as e:
+                await ctx.send(f"Failed to connect to local Ollama API: {e}" + AI_MARKER, delete_after=5)
         
     elif action == "set":
         if not model_name:
-            await ctx.send(f"You gotta specify a model name! Like: `{COMMAND_PREFIX}models set gemini-2.5-pro`" + AI_MARKER, delete_after=5)
+            await ctx.send(f"You gotta specify a model name! Like: `{COMMAND_PREFIX}models set llama3`" + AI_MARKER, delete_after=5)
             return
             
-        config_data["ACTIVE_MODEL"] = model_name
+        if backend == "gemini":
+            config_data["ACTIVE_MODEL"] = model_name
+        else:
+            config_data["ACTIVE_OLLAMA_MODEL"] = model_name
+            
         save_config()
-        await ctx.send(f"Active model set to `{model_name}`" + AI_MARKER, delete_after=5)
+        await ctx.send(f"Active {backend} model set to `{model_name}`" + AI_MARKER, delete_after=5)
         
     else:
-        await ctx.send(f"Usage:\n`{COMMAND_PREFIX}models list` -> Shows available models\n`{COMMAND_PREFIX}models set <model>` -> Changes active model" + AI_MARKER, delete_after=8)
+        await ctx.send(f"Usage:\n`{COMMAND_PREFIX}models list` -> Shows models for current backend\n`{COMMAND_PREFIX}models set <model>` -> Changes active model" + AI_MARKER, delete_after=8)
 
 @bot.command()
 async def song(ctx, *, prompt: str = None):
@@ -667,11 +885,11 @@ async def video(ctx, *, prompt: str = None):
     await process_video_request(ctx.message, prompt)
 
 @bot.command()
-async def paint(ctx, *, prompt: str = None):
+async def image(ctx, *, prompt: str = None):
     if not prompt:
-        await ctx.send(f"Blud, I cant create a image out of nthn 🥀, use it like this: `{COMMAND_PREFIX}paint [prompt]`" + AI_MARKER, delete_after=5)
+        await ctx.send(f"Blud, I cant create a image out of nthn 🥀, use it like this: `{COMMAND_PREFIX}image [prompt]`" + AI_MARKER, delete_after=5)
         return
-    await process_paint_request(ctx.message, prompt)
+    await process_image_request(ctx.message, prompt)
 
 @bot.command()
 async def remember(ctx, *, text: str):

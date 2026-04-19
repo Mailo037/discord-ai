@@ -5,3 +5,4 @@ __pycache__/
 *.txt
 !instructions.txt
 !discord_dir.txt
+!requirements.txt
