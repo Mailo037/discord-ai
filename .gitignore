@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+*.json
+*.txt
+!instructions.txt
+!discord_dir.txt
