@@ -992,7 +992,7 @@ async def refresh(ctx):
         await ctx.send("brb" + AI_MARKER, delete_after=3)
     except:
         pass
-    os.execv(sys.executable, ['python'] + sys.argv)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @bot.command()
 async def purge(ctx, amount: int = 10, scope: str = "channel"):

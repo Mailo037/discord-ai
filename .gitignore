@@ -6,3 +6,4 @@ __pycache__/
 !instructions.txt
 !discord_dir.txt
 !requirements.txt
+!install.sh
