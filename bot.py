@@ -4,13 +4,32 @@ import os
 
 # --- AUTOMATIC REQUIREMENTS INSTALLATION ---
 def install_requirements():
+    try:
+        import discord
+        import dotenv
+        import aiohttp
+        import google.genai
+        return
+    except ImportError:
+        pass
+
     req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
     if os.path.exists(req_file):
-        print("Checking/Installing dependencies... (this might take a second)")
+        print("\n[!] IMPORTANT: Some dependencies are missing. Installing them now...")
+        print("[!] This is only done once. Please wait a moment...\n")
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", req_file])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_file])
+            print("\n[+] Dependencies installed successfully!")
+            
+            import importlib
+            importlib.invalidate_caches()
         except Exception as e:
-            print(f"Note: Auto-install skipped or failed: {e}")
+            print(f"\n[X] CRITICAL ERROR: Auto-installation failed: {e}")
+            print("[X] Please run 'pip install -r requirements.txt' manually in your terminal.")
+            sys.exit(1)
+    else:
+        print("\n[X] CRITICAL ERROR: requirements.txt not found! 🥀")
+        sys.exit(1)
 
 install_requirements()
 
