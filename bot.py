@@ -8,12 +8,14 @@ import sys
 import asyncio
 import json
 import aiohttp
+import random
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 last_response_time = 0
 message_context_limit = 10
+COMMAND_PREFIX = "!"
 
 # For this to work you need to have the Vertex AI .json credetials file in this folder under the name "vertex-credentials.json"
 # Here is a tutorial on how to get it https://docs.decisionrules.io/doc/ai-assistant/assistant-setup/google-vertex-credentials-json
@@ -62,6 +64,13 @@ def load_config():
         return default_config
 
 config_data = load_config()
+
+def save_config():
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4)
+    except Exception as e:
+        print(f"Failed to save config: {e}")
 
 ALLOWED_CHANNELS = config_data.get("ALLOWED_CHANNELS", [])
 COOLDOWN_SECONDS = config_data.get("COOLDOWN_SECONDS", 5)
@@ -116,18 +125,35 @@ async def safe_reply(message, content=None, **kwargs):
         print(f"Unexpected error in safe_reply: {e}")
         return None
 
+PAINT_START_MSGS = ["Lemme paint ts 😭🙏", "Hold on, cooking up a masterpiece 👨‍🎨", "Generating your image blud... ⏳", "Gotchu, drawing this rn 🖌️"]
+PAINT_DONE_MSGS = ["Heres yo image blud 🤑", "Ts goes hard ngl 🔥", "Done painting this for u 🎨", "Masterpiece completed 🖼️"]
+
+VIDEO_START_MSGS = ["Lemme cook up this video ts 🎬 (this takes some minutes)", "Directing your movie rn 🎥 (gimme a few mins)", "Generating video... grab some popcorn 🍿", "Cooking up the visuals, hold tight 🎞️"]
+VIDEO_DONE_MSGS = ["Here is your video blud 🎥", "Movie is ready, ts is crazy 🎬", "Done rendering your clip 🎞️", "Here you go, Spielberg 🍿"]
+VIDEO_LARGE_MSGS = ["Video generated but it is large. Downloading from Cloud URI... ⏳", "File is massive, pulling it from the cloud rn ☁️", "Hold on, downloading the big file... 📡"]
+
+SONG_START_MSGS = ["Lemme cook up this song 🎵 (hold on)", "Producing your track rn 🎧 (wait a sec)", "Making beats for you... 🎹", "Tuning the instruments, gimme a sec 🎸"]
+SONG_DONE_MSGS = ["Here is your song blud 🎶", "Track is ready, ts is a banger 🎧", "Done producing your audio 🔊", "Grammy winning track right here 🏆"]
+
+ERROR_MSGS = ["Nah fam, ts was too hard: {e}", "Bro broke the API: {e} 💀", "My bad gng, error: {e} 🥀", "Aint no way, something failed: {e} 📉"]
 
 @bot.event
 async def on_ready():
     print(f'Successfully logged in as {bot.user} (ID: {bot.user.id})')
     print('--------------------------------------------------')
-    print(f'Use !remember <user?> <text> to save a fact about a user or into global memories')
-    print(f'Use !forget to delete every memory')
-    print(f'Use !byebye to stop the bot')
-    print(f'Use !refresh to refresh the bot')
-    print(f'Use !paint <prompt> to make a image')
-    print(f'Use !video <prompt> to make a video')
-    print(f'Use !song <prompt> to make a song')
+    print(f'Prefix is set to: {COMMAND_PREFIX}')
+    print(f'Use {COMMAND_PREFIX}self <prompt> to talk to the ai (the bot will ignore self pings)')
+    print(f'Use {COMMAND_PREFIX}remember <user?> <text> to save a fact about a user or into global memories')
+    print(f'Use {COMMAND_PREFIX}forget to delete every memory')
+    print(f'Use {COMMAND_PREFIX}byebye to stop the bot')
+    print(f'Use {COMMAND_PREFIX}refresh to refresh the bot')
+    print(f'Use {COMMAND_PREFIX}paint <prompt> to make a image')
+    print(f'Use {COMMAND_PREFIX}video <prompt> to make a video')
+    print(f'Use {COMMAND_PREFIX}song <prompt> to make a song')
+    print(f'Use {COMMAND_PREFIX}ban/unban <user> to ban/unban a user')
+    print(f'Use {COMMAND_PREFIX}addpaint/rmpaint <user> to add/remove a user from the allowed paint list')
+    print(f'Use {COMMAND_PREFIX}addvideo/rmvideo <user> to add/remove a user from the allowed video list')
+    print(f'Use {COMMAND_PREFIX}addsong/rmsong <user> to add/remove a user from the allowed song list')
     print('--------------------------------------------------')
     
     if os.path.exists("refresh_channel.txt"):
@@ -145,30 +171,33 @@ async def on_ready():
 async def on_message(message):
     global last_response_time
 
-    if message.author.id in BANNED_USERS:
+    if message.author.id in config_data.get("BANNED_USERS", []):
         return
 
-    if message.author == bot.user:
+    is_self_cmd = message.content.startswith(f"{COMMAND_PREFIX}self ")
+
+    if message.author == bot.user and not is_self_cmd:
         await bot.process_commands(message)
         return
 
-    if ALLOWED_CHANNELS and message.channel.id not in ALLOWED_CHANNELS:
+    allowed_channels = config_data.get("ALLOWED_CHANNELS", [])
+    if allowed_channels and message.channel.id not in allowed_channels:
         return
 
-    if message.content.startswith("!paint ") and message.author.id in ALLOWED_PAINT_USERS:
-        prompt = message.content[len("!paint "):].strip()
+    if message.content.startswith(f"{COMMAND_PREFIX}paint ") and message.author.id in config_data.get("ALLOWED_PAINT_USERS", []):
+        prompt = message.content[len(f"{COMMAND_PREFIX}paint "):].strip()
         if prompt:
             await process_paint_request(message, prompt)
             return
 
-    if message.content.startswith("!video ") and message.author.id in ALLOWED_VIDEO_USERS:
-        prompt = message.content[len("!video "):].strip()
+    if message.content.startswith(f"{COMMAND_PREFIX}video ") and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", []):
+        prompt = message.content[len(f"{COMMAND_PREFIX}video "):].strip()
         if prompt:
             await process_video_request(message, prompt)
             return
 
-    if message.content.startswith("!song ") and message.author.id in ALLOWED_SONG_USERS:
-        prompt = message.content[len("!song "):].strip()
+    if message.content.startswith(f"{COMMAND_PREFIX}song ") and message.author.id in config_data.get("ALLOWED_SONG_USERS", []):
+        prompt = message.content[len(f"{COMMAND_PREFIX}song "):].strip()
         if prompt:
             await process_song_request(message, prompt)
             return
@@ -178,7 +207,7 @@ async def on_message(message):
         return
 
     current_time = time.time()
-    if current_time - last_response_time < COOLDOWN_SECONDS:
+    if current_time - last_response_time < config_data.get("COOLDOWN_SECONDS", 5):
         return
     
     if gemini_client:
@@ -336,7 +365,7 @@ async def on_message(message):
                 reply_text = re.sub(r'\[SONG:\s*.*?\]', '', reply_text).strip()
                 
         except Exception as e:
-            reply_text = f"Error gng: {e}"
+            reply_text = random.choice(ERROR_MSGS).format(e=e)
             paint_match = None
             video_match = None
             song_match = None
@@ -353,12 +382,16 @@ async def on_message(message):
         else:
             await safe_reply(message, content=reply_text + AI_MARKER)
     
-    if paint_match and message.author.id in ALLOWED_PAINT_USERS:
+    if paint_match and message.author.id in config_data.get("ALLOWED_PAINT_USERS", []):
         asyncio.create_task(process_paint_request(message, paint_match.group(1)))
-    elif video_match and message.author.id in ALLOWED_VIDEO_USERS:
+    elif video_match and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", []):
         asyncio.create_task(process_video_request(message, video_match.group(1)))
-    elif song_match and message.author.id in ALLOWED_SONG_USERS:
+    elif song_match and message.author.id in config_data.get("ALLOWED_SONG_USERS", []):
         asyncio.create_task(process_song_request(message, song_match.group(1)))
+
+# ---------------------------------------------------------
+# MEDIA PROCESSORS
+# ---------------------------------------------------------
 
 async def process_paint_request(message, prompt: str):
     if not gemini_client:
@@ -366,7 +399,7 @@ async def process_paint_request(message, prompt: str):
         return
 
     try:
-        msg = await safe_reply(message, content=f"Lemme paint ts 😭🙏")
+        msg = await safe_reply(message, content=random.choice(PAINT_START_MSGS))
         
         result = await gemini_client.aio.models.generate_images(
             model='imagen-4.0-generate-001',
@@ -384,7 +417,7 @@ async def process_paint_request(message, prompt: str):
         for generated_image in result.generated_images:
             file_obj = io.BytesIO(generated_image.image.image_bytes)
             file = discord.File(file_obj, filename="bild.jpeg")
-            await safe_reply(message, content=f"Heres yo image blud 🤑", file=file)
+            await safe_reply(message, content=random.choice(PAINT_DONE_MSGS), file=file)
             break
             
         try:
@@ -393,13 +426,13 @@ async def process_paint_request(message, prompt: str):
             pass
             
     except Exception as e:
-        await safe_reply(message, content=f"Nah fam, ts was to hard: {e}")
+        await safe_reply(message, content=random.choice(ERROR_MSGS).format(e=e))
 
 async def process_video_request(message, prompt: str):
     if not gemini_client:
         return
 
-    msg = await safe_reply(message, content=f"Lemme cook up this video ts 🎬 (this takes some minutes)")
+    msg = await safe_reply(message, content=random.choice(VIDEO_START_MSGS))
     try:
         op = await gemini_client.aio.models.generate_videos(
             model='veo-2.0-generate-001',
@@ -421,7 +454,7 @@ async def process_video_request(message, prompt: str):
                 video_data = generated_video.video.video_bytes
 
                 if (video_data is None or len(video_data) == 0) and getattr(generated_video.video, 'uri', None):
-                    if msg: await msg.edit(content="Video generated but it is large. Downloading from Cloud URI... ⏳" + AI_MARKER)
+                    if msg: await msg.edit(content=random.choice(VIDEO_LARGE_MSGS) + AI_MARKER)
                     async with aiohttp.ClientSession() as session:
                         async with session.get(generated_video.video.uri) as resp:
                             if resp.status == 200:
@@ -437,7 +470,7 @@ async def process_video_request(message, prompt: str):
                 file_obj = io.BytesIO(video_data)
                 file = discord.File(file_obj, filename="video.mp4")
                 try:
-                    await safe_reply(message, content=f"Here is your video blud 🎥", file=file)
+                    await safe_reply(message, content=random.choice(VIDEO_DONE_MSGS), file=file)
                 except Exception as e:
                     cloud_uri = getattr(generated_video.video, 'uri', 'Nicht verfügbar')
                     await safe_reply(message, content=f"Bro the video is too big 😭 ({len(video_data)/(1024*1024):.2f}MB).\nDownload it or smth: {cloud_uri}")
@@ -451,14 +484,14 @@ async def process_video_request(message, prompt: str):
             pass
             
     except Exception as e:
-        await safe_reply(message, content=f"Nah fam, ts was too hard: {e}")
+        await safe_reply(message, content=random.choice(ERROR_MSGS).format(e=e))
 
 async def process_song_request(message, prompt: str):
     if not lyria_client:
         await safe_reply(message, content="Cant make songs rn gng 🥀, I need your ai studio API Key 🤑.")
         return
 
-    msg = await safe_reply(message, content=f"Lemme cook up this song 🎵 (hold on)")
+    msg = await safe_reply(message, content=random.choice(SONG_START_MSGS))
     try:
         response = await lyria_client.aio.models.generate_content(
             model='lyria-3-clip-preview',
@@ -486,7 +519,7 @@ async def process_song_request(message, prompt: str):
             if len(lyrics_text) > 1800:
                 lyrics_text = lyrics_text[:1800] + "..."
         
-        reply_content = f"Here is your song blud 🎶"
+        reply_content = random.choice(SONG_DONE_MSGS)
         if lyrics_text:
             reply_content += f"\n```\n{lyrics_text}\n```"
             
@@ -498,26 +531,96 @@ async def process_song_request(message, prompt: str):
             pass
             
     except Exception as e:
-        await safe_reply(message, content=f"Nah fam, song generation failed: {e}")
+        await safe_reply(message, content=random.choice(ERROR_MSGS).format(e=e))
+
+# ---------------------------------------------------------
+# BOT COMMANDS (CONFIG MANAGEMENT & OTHERS)
+# ---------------------------------------------------------
+
+async def handle_list_toggle(ctx, list_key: str, action_name: str, add: bool):
+    """Helper command to add or remove users from config lists safely."""
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+    if not ctx.message.mentions:
+        await ctx.send(f"You gotta ping someone 💀" + AI_MARKER, delete_after=5)
+        return
+
+    user_id = ctx.message.mentions[0].id
+    user_name = ctx.message.mentions[0].name
+    
+    current_list = config_data.get(list_key, [])
+    
+    if add:
+        if user_id not in current_list:
+            current_list.append(user_id)
+            config_data[list_key] = current_list
+            save_config()
+            await ctx.send(f"Successfully {action_name} {user_name} 📝" + AI_MARKER, delete_after=3)
+        else:
+            await ctx.send(f"{user_name} is already {action_name} 💀" + AI_MARKER, delete_after=3)
+    else:
+        if user_id in current_list:
+            current_list.remove(user_id)
+            config_data[list_key] = current_list
+            save_config()
+            await ctx.send(f"Successfully removed {user_name} from {action_name} 📝" + AI_MARKER, delete_after=3)
+        else:
+            await ctx.send(f"{user_name} is not {action_name} 💀" + AI_MARKER, delete_after=3)
+
+@bot.command()
+async def ban(ctx):
+    await handle_list_toggle(ctx, "BANNED_USERS", "banned", add=True)
+
+@bot.command()
+async def unban(ctx):
+    await handle_list_toggle(ctx, "BANNED_USERS", "banned", add=False)
+
+@bot.command()
+async def addpaint(ctx):
+    await handle_list_toggle(ctx, "ALLOWED_PAINT_USERS", "allowed to paint", add=True)
+
+@bot.command()
+async def rmpaint(ctx):
+    await handle_list_toggle(ctx, "ALLOWED_PAINT_USERS", "allowed to paint", add=False)
+
+@bot.command()
+async def addvideo(ctx):
+    await handle_list_toggle(ctx, "ALLOWED_VIDEO_USERS", "allowed to video", add=True)
+
+@bot.command()
+async def rmvideo(ctx):
+    await handle_list_toggle(ctx, "ALLOWED_VIDEO_USERS", "allowed to video", add=False)
+
+@bot.command()
+async def addsong(ctx):
+    await handle_list_toggle(ctx, "ALLOWED_SONG_USERS", "allowed to song", add=True)
+
+@bot.command()
+async def rmsong(ctx):
+    await handle_list_toggle(ctx, "ALLOWED_SONG_USERS", "allowed to song", add=False)
+
 
 @bot.command()
 async def song(ctx, *, prompt: str = None):
     if not prompt:
-        await ctx.send("Blud, I cant create a song out of nthn 🥀, use it like this: `!song [prompt]`" + AI_MARKER, delete_after=5)
+        await ctx.send(f"Blud, I cant create a song out of nthn 🥀, use it like this: `{COMMAND_PREFIX}song [prompt]`" + AI_MARKER, delete_after=5)
         return
     await process_song_request(ctx.message, prompt)
 
 @bot.command()
 async def video(ctx, *, prompt: str = None):
     if not prompt:
-        await ctx.send("Blud, I cant create a video out of nthn 🥀, use it like this: `!video [prompt]`" + AI_MARKER, delete_after=5)
+        await ctx.send(f"Blud, I cant create a video out of nthn 🥀, use it like this: `{COMMAND_PREFIX}video [prompt]`" + AI_MARKER, delete_after=5)
         return
     await process_video_request(ctx.message, prompt)
 
 @bot.command()
 async def paint(ctx, *, prompt: str = None):
     if not prompt:
-        await ctx.send("Blud, I cant create a image out of nthn 🥀, use it like this: `!paint [prompt]`" + AI_MARKER, delete_after=5)
+        await ctx.send(f"Blud, I cant create a image out of nthn 🥀, use it like this: `{COMMAND_PREFIX}paint [prompt]`" + AI_MARKER, delete_after=5)
         return
     await process_paint_request(ctx.message, prompt)
 
@@ -615,8 +718,10 @@ async def purge(ctx, amount: int = 10, scope: str = "channel"):
     deleted = 0
     limit_scan = 1000 
     
-    if scope == "all":
-        for ch_id in ALLOWED_CHANNELS:
+    allowed_channels = config_data.get("ALLOWED_CHANNELS", [])
+    
+    if scope == "all" and allowed_channels:
+        for ch_id in allowed_channels:
             channel = bot.get_channel(ch_id)
             if channel:
                 try:
@@ -659,7 +764,6 @@ async def purge(ctx, amount: int = 10, scope: str = "channel"):
 
 # --- EXECUTION ---
 if __name__ == "__main__":
-    # Get the token from environment variables
     TOKEN = os.getenv("DISCORD_TOKEN")
     
     if not TOKEN:
