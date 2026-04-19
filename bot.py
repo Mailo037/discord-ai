@@ -1,33 +1,42 @@
+print("[DEBUG] Bot script started...")
 import sys
 import subprocess
 import os
 
 # --- AUTOMATIC REQUIREMENTS INSTALLATION ---
 def install_requirements():
+    print("[DEBUG] Checking dependencies...", flush=True)
     try:
+        print("[DEBUG] Checking discord...", flush=True)
         import discord
+        print("[DEBUG] Checking dotenv...", flush=True)
         import dotenv
+        print("[DEBUG] Checking aiohttp...", flush=True)
         import aiohttp
+        print("[DEBUG] Checking google.genai...", flush=True)
         import google.genai
+        print("[DEBUG] All dependencies already installed.", flush=True)
         return
-    except ImportError:
-        pass
+    except ImportError as e:
+        print(f"[DEBUG] Missing dependency: {e}", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] Unexpected error during import check: {e}", flush=True)
 
     req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
     if os.path.exists(req_file):
-        print("\n[!] IMPORTANT: Some dependencies are missing. Installing them now...")
-        print("[!] This is only done once. Please wait a moment...\n")
+        print("\n[!] IMPORTANT: Some dependencies are missing. Installing them now...", flush=True)
+        print("[!] This is only done once. Please wait a moment...\n", flush=True)
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_file])
-            print("\n[+] Dependencies installed successfully!")
+            print("\n[+] Dependencies installed successfully!", flush=True)
             import importlib
             importlib.invalidate_caches()
         except Exception as e:
-            print(f"\n[X] CRITICAL ERROR: Auto-installation failed: {e}")
-            print("[X] Please run 'pip install -r requirements.txt' manually in your terminal.")
+            print(f"\n[X] CRITICAL ERROR: Auto-installation failed: {e}", flush=True)
+            print("[X] Please run 'pip install -r requirements.txt' manually in your terminal.", flush=True)
             sys.exit(1)
     else:
-        print("\n[X] CRITICAL ERROR: requirements.txt not found! 🥀")
+        print("\n[X] CRITICAL ERROR: requirements.txt not found! 🥀", flush=True)
         sys.exit(1)
 
 install_requirements()
