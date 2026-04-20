@@ -70,6 +70,9 @@ load_dotenv()
 #   GEMINI_API_KEY=your_api_key_here  (optional, only needed for song generation via Lyria)
 #   DISCORD_TOKEN=your_discord_token_here
 
+# --- SILENT / CONSOLE MODE ---
+# Commands that support !s<cmd> (silent: no Discord output, side effects still happen)
+
 # --- FILE PATHS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -94,6 +97,25 @@ CREDENTIALS_FILE = os.path.join(BASE_DIR, "vertex-credentials.json")
 #   "AI_BACKEND": "gemini",
 #   "FEATURES": {"IMAGE_ENABLED": true, "VIDEO_ENABLED": true, "SONG_ENABLED": true}
 # }
+
+SILENT_COMMANDS = {
+    "image", "song", "remember", "backend", "toggle",
+    "user", "channel", "models", "personality", "purge", "self", "bye"
+}
+# Commands that support !c<cmd> (console: output goes to terminal instead of Discord)
+CONSOLE_COMMANDS = {
+    "status", "memories", "models", "user", "channel"
+}
+# NOTE: !video intentionally excluded from both — long render, user needs progress feedback.
+
+# Per-message flags: message_id -> {"silent": bool, "console": bool}
+_msg_flags: dict[int, dict] = {}
+
+def get_msg_flags(message_id: int) -> dict:
+    return _msg_flags.get(message_id, {"silent": False, "console": False})
+
+def cleanup_msg_flags(message_id: int):
+    _msg_flags.pop(message_id, None)
 
 def load_config():
     default_config = {
@@ -178,11 +200,31 @@ bot = commands.Bot(command_prefix=COMMAND_PREFIX, self_bot=True)
 
 AI_MARKER = "\u200b\u200c"
 
+# ---------------------------------------------------------
+# OUTPUT HELPERS
+# ---------------------------------------------------------
+
 async def safe_reply(message, content=None, **kwargs):
+    """Reply to a message, respecting silent/console flags."""
+    flags = get_msg_flags(message.id)
+
+    if flags.get("silent"):
+        return None
+
+    if flags.get("console"):
+        clean = (str(content) if content else "").replace(AI_MARKER, "").strip()
+        if clean:
+            print(f"[BOT → console] {clean}")
+        # If a file is attached, mention it in the console
+        if "file" in kwargs:
+            print(f"[BOT → console] (file attachment suppressed in console mode)")
+        return None
+
     if content is None:
         content = AI_MARKER
     else:
         content = str(content) + AI_MARKER
+
     try:
         return await message.reply(content=content, **kwargs)
     except discord.errors.HTTPException:
@@ -191,6 +233,25 @@ async def safe_reply(message, content=None, **kwargs):
     except Exception as e:
         print(f"Unexpected error in safe_reply: {e}")
         return None
+
+
+async def cmd_send(ctx, content=None, **kwargs):
+    """Drop-in replacement for ctx.send() that respects silent/console flags."""
+    flags = get_msg_flags(ctx.message.id)
+
+    if flags.get("silent"):
+        return None
+
+    if flags.get("console"):
+        clean = (str(content) if content else "").replace(AI_MARKER, "").strip()
+        if clean:
+            print(f"[BOT → console] {clean}")
+        if "file" in kwargs:
+            print(f"[BOT → console] (file attachment suppressed in console mode)")
+        return None
+
+    return await ctx.send(content=content, **kwargs)
+
 
 def fmt_uptime(seconds: float) -> str:
     seconds = int(seconds)
@@ -327,6 +388,9 @@ async def on_ready():
     print(f'Successfully logged in as {bot.user} (ID: {bot.user.id})')
     print('--------------------------------------------------')
     print(f'Prefix: {COMMAND_PREFIX}')
+    print(f'  Tip: Prepend "s" for silent mode  — e.g. !sremember, !sbackend')
+    print(f'  Tip: Prepend "c" for console mode — e.g. !cstatus, !cmemories')
+    print('--------------------------------------------------')
     print(f'{COMMAND_PREFIX}self <prompt>          — Talk to the AI (ignores self pings)')
     print(f'{COMMAND_PREFIX}backend [gemini/ollama] — Switch AI engine')
     print(f'{COMMAND_PREFIX}models list/set <model> — Manage active model')
@@ -348,7 +412,7 @@ async def on_ready():
     print(f'{COMMAND_PREFIX}channel remove [id]     — Remove channel from allowed list')
     print(f'{COMMAND_PREFIX}channel cooldown <s/false> [id] — Set/remove channel cooldown')
     print(f'{COMMAND_PREFIX}image <prompt>          — Generate image')
-    print(f'{COMMAND_PREFIX}video <prompt>          — Generate video')
+    print(f'{COMMAND_PREFIX}video <prompt>          — Generate video (no silent/console — needs progress feedback)')
     print(f'{COMMAND_PREFIX}song <prompt>           — Generate song')
     print(f'{COMMAND_PREFIX}user info/ban/unban/allow/deny — User management')
     print(f'{COMMAND_PREFIX}toggle [image/video/song]— Enable/disable features globally')
@@ -374,6 +438,28 @@ async def on_message(message):
     if message.author.id in config_data.get("BANNED_USERS", []):
         return
 
+    # --- Silent / Console mode prefix detection ---
+    # Must run before everything else so flags are set before any command runs.
+    if message.content.startswith(COMMAND_PREFIX):
+        rest = message.content[len(COMMAND_PREFIX):]
+        detected = False
+        for flag_char, flag_key, valid_cmds in [
+            ("s", "silent",  SILENT_COMMANDS),
+            ("c", "console", CONSOLE_COMMANDS),
+        ]:
+            if (rest.startswith(flag_char)
+                    and len(rest) > 1
+                    and not rest[1:2].isspace()):
+                cmd_candidate = rest[1:].split()[0].lower() if rest[1:].split() else ""
+                if cmd_candidate in valid_cmds:
+                    _msg_flags[message.id] = {flag_key: True}
+                    # Rewrite content so the normal command handler fires
+                    message.content = COMMAND_PREFIX + rest[1:]
+                    if flag_key == "console":
+                        print(f"[BOT] Console mode activated for: !{cmd_candidate}")
+                    detected = True
+                    break
+
     features = config_data.get("FEATURES", {})
     backend = config_data.get("AI_BACKEND", "gemini")
     is_dm = isinstance(message.channel, discord.DMChannel)
@@ -396,6 +482,7 @@ async def on_message(message):
                f"**Personality:** {'Allowed' if can_per else 'Denied'} "
                f"{'(active)' if has_per else '(not set)'}")
         await safe_reply(message, content=msg, delete_after=5)
+        cleanup_msg_flags(message.id)
         return
 
     is_self_cmd = message.content.startswith(f"{COMMAND_PREFIX}self ")
@@ -412,10 +499,12 @@ async def on_message(message):
     if message.content.startswith(f"{COMMAND_PREFIX}image ") and message.author.id in config_data.get("ALLOWED_IMAGE_USERS", []):
         if not features.get("IMAGE_ENABLED", True):
             await safe_reply(message, content="Cant create an image rn.")
+            cleanup_msg_flags(message.id)
             return
         prompt = message.content[len(f"{COMMAND_PREFIX}image "):].strip()
         if prompt:
             await process_image_request(message, prompt)
+            cleanup_msg_flags(message.id)
             return
 
     if message.content.startswith(f"{COMMAND_PREFIX}video ") and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", []):
@@ -430,10 +519,12 @@ async def on_message(message):
     if message.content.startswith(f"{COMMAND_PREFIX}song ") and message.author.id in config_data.get("ALLOWED_SONG_USERS", []):
         if not features.get("SONG_ENABLED", True):
             await safe_reply(message, content="Cant create a song rn.")
+            cleanup_msg_flags(message.id)
             return
         prompt = message.content[len(f"{COMMAND_PREFIX}song "):].strip()
         if prompt:
             await process_song_request(message, prompt)
+            cleanup_msg_flags(message.id)
             return
 
     if bot.user not in message.mentions and not is_self_cmd:
@@ -684,6 +775,8 @@ async def on_message(message):
     elif song_match and can_song:
         asyncio.create_task(process_song_request(message, song_match.group(1)))
 
+    cleanup_msg_flags(message.id)
+
 
 async def process_image_request(message, prompt: str):
     if not gemini_client:
@@ -712,9 +805,11 @@ async def process_image_request(message, prompt: str):
         await safe_reply(message, content=random.choice(ERROR_MSGS).format(e=e))
 
 async def process_video_request(message, prompt: str):
+    # NOTE: Video intentionally does NOT respect silent/console mode.
+    # Rendering takes several minutes — the user needs progress feedback.
     if not gemini_client:
         return
-    msg = await safe_reply(message, content=random.choice(VIDEO_START_MSGS))
+    msg = await message.reply(content=random.choice(VIDEO_START_MSGS) + AI_MARKER)
     try:
         op = await gemini_client.aio.models.generate_videos(model='veo-2.0-generate-001', prompt=prompt)
         while not op.done:
@@ -743,10 +838,10 @@ async def process_video_request(message, prompt: str):
                 file_obj = io.BytesIO(video_data)
                 file = discord.File(file_obj, filename="video.mp4")
                 try:
-                    await safe_reply(message, content=random.choice(VIDEO_DONE_MSGS), file=file)
+                    await message.reply(content=random.choice(VIDEO_DONE_MSGS) + AI_MARKER, file=file)
                 except Exception as e:
                     cloud_uri = getattr(generated_video.video, 'uri', 'N/A')
-                    await safe_reply(message, content=f"Video too big ({len(video_data)/(1024*1024):.2f}MB). Download: {cloud_uri}")
+                    await message.channel.send(content=f"Video too big ({len(video_data)/(1024*1024):.2f}MB). Download: {cloud_uri}" + AI_MARKER)
                 break
         else:
             if msg: await msg.edit(content="API didn't return any video (blocked?)" + AI_MARKER)
@@ -755,7 +850,7 @@ async def process_video_request(message, prompt: str):
         except:
             pass
     except Exception as e:
-        await safe_reply(message, content=random.choice(ERROR_MSGS).format(e=e))
+        await message.channel.send(content=random.choice(ERROR_MSGS).format(e=e) + AI_MARKER)
 
 async def process_song_request(message, prompt: str):
     if not lyria_client:
@@ -796,7 +891,7 @@ async def handle_list_toggle(ctx, list_key: str, action_name: str, add: bool):
     except:
         pass
     if not ctx.message.mentions:
-        await ctx.send("You gotta ping someone" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "You gotta ping someone" + AI_MARKER, delete_after=5)
         return
     user_id   = ctx.message.mentions[0].id
     user_name = ctx.message.mentions[0].name
@@ -806,29 +901,31 @@ async def handle_list_toggle(ctx, list_key: str, action_name: str, add: bool):
             current_list.append(user_id)
             config_data[list_key] = current_list
             save_config()
-            await ctx.send(f"Successfully {action_name} ({user_name})" + AI_MARKER, delete_after=3)
+            await cmd_send(ctx, f"Successfully {action_name} ({user_name})" + AI_MARKER, delete_after=3)
         else:
-            await ctx.send(f"{user_name} is already {action_name}" + AI_MARKER, delete_after=3)
+            await cmd_send(ctx, f"{user_name} is already {action_name}" + AI_MARKER, delete_after=3)
     else:
         if user_id in current_list:
             current_list.remove(user_id)
             config_data[list_key] = current_list
             save_config()
-            await ctx.send(f"Successfully removed {user_name} from {action_name}" + AI_MARKER, delete_after=3)
+            await cmd_send(ctx, f"Successfully removed {user_name} from {action_name}" + AI_MARKER, delete_after=3)
         else:
-            await ctx.send(f"{user_name} is not {action_name}" + AI_MARKER, delete_after=3)
+            await cmd_send(ctx, f"{user_name} is not {action_name}" + AI_MARKER, delete_after=3)
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.group(invoke_without_command=True)
 async def user(ctx):
     try: await ctx.message.delete()
     except: pass
-    await ctx.send(
+    await cmd_send(ctx,
         f"Usage:\n"
         f"`{COMMAND_PREFIX}user info [@user]`\n"
         f"`{COMMAND_PREFIX}user ban/unban <@user>`\n"
         f"`{COMMAND_PREFIX}user allow/deny <@user> <image/video/song>`" + AI_MARKER,
         delete_after=10
     )
+    cleanup_msg_flags(ctx.message.id)
 
 @user.command(name="ban")
 async def user_ban(ctx):
@@ -841,13 +938,11 @@ async def user_unban(ctx):
 @user.command(name="allow")
 async def user_allow(ctx, *args):
     valid_perms = ["image", "video", "song", "personality"]
-    # We look for the perm type in any of the provided arguments
     perm_type = next((x.lower() for x in args if x.lower() in valid_perms), None)
-
     if not perm_type:
-        await ctx.send("Specify what to allow: `image`, `video`, `song`, or `personality`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Specify what to allow: `image`, `video`, `song`, or `personality`" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
-
     list_key = f"ALLOWED_{perm_type.upper()}_USERS"
     await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=True)
 
@@ -855,11 +950,10 @@ async def user_allow(ctx, *args):
 async def user_deny(ctx, *args):
     valid_perms = ["image", "video", "song", "personality"]
     perm_type = next((x.lower() for x in args if x.lower() in valid_perms), None)
-
     if not perm_type:
-        await ctx.send("Specify what to deny: `image`, `video`, `song`, or `personality`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Specify what to deny: `image`, `video`, `song`, or `personality`" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
-
     list_key = f"ALLOWED_{perm_type.upper()}_USERS"
     await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=False)
 
@@ -868,7 +962,8 @@ async def toggle(ctx, feature: str = None):
     try: await ctx.message.delete()
     except: pass
     if not feature or feature.lower() not in ["image", "video", "song"]:
-        await ctx.send("Specify what to toggle: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Specify what to toggle: `image`, `video`, or `song`" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     feat_key = f"{feature.upper()}_ENABLED"
     features = config_data.setdefault("FEATURES", {})
@@ -876,7 +971,8 @@ async def toggle(ctx, feature: str = None):
     features[feat_key] = new_state
     save_config()
     state_str = "ENABLED" if new_state else "DISABLED"
-    await ctx.send(f"Global feature `{feature}` is now {state_str}" + AI_MARKER, delete_after=5)
+    await cmd_send(ctx, f"Global feature `{feature}` is now {state_str}" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.command()
 async def backend(ctx, backend_name: str = None):
@@ -884,11 +980,13 @@ async def backend(ctx, backend_name: str = None):
     except: pass
     if not backend_name or backend_name.lower() not in ["gemini", "ollama"]:
         current = config_data.get("AI_BACKEND", "gemini")
-        await ctx.send(f"Current Backend: `{current}`\nUsage: `{COMMAND_PREFIX}backend [gemini|ollama]`" + AI_MARKER, delete_after=8)
+        await cmd_send(ctx, f"Current Backend: `{current}`\nUsage: `{COMMAND_PREFIX}backend [gemini|ollama]`" + AI_MARKER, delete_after=8)
+        cleanup_msg_flags(ctx.message.id)
         return
     config_data["AI_BACKEND"] = backend_name.lower()
     save_config()
-    await ctx.send(f"AI Backend switched to `{backend_name.lower()}`" + AI_MARKER, delete_after=5)
+    await cmd_send(ctx, f"AI Backend switched to `{backend_name.lower()}`" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.command()
 async def models(ctx, action: str = None, model_name: str = None):
@@ -905,9 +1003,9 @@ async def models(ctx, action: str = None, model_name: str = None):
                 for m in names:
                     marker = " ← active" if m == active else ""
                     msg += f"- `{m}`{marker}\n"
-                await ctx.send(msg + AI_MARKER, delete_after=15)
+                await cmd_send(ctx, msg + AI_MARKER, delete_after=15)
             except Exception as e:
-                await ctx.send(f"Error fetching Vertex models: {e}" + AI_MARKER, delete_after=5)
+                await cmd_send(ctx, f"Error fetching Vertex models: {e}" + AI_MARKER, delete_after=5)
         elif backend_val == "ollama":
             active = config_data.get("ACTIVE_OLLAMA_MODEL", "llama3.2")
             try:
@@ -920,27 +1018,29 @@ async def models(ctx, action: str = None, model_name: str = None):
                             for m in names:
                                 marker = " ← active" if m == active else ""
                                 msg += f"- `{m}`{marker}\n"
-                            await ctx.send(msg + AI_MARKER, delete_after=15)
+                            await cmd_send(ctx, msg + AI_MARKER, delete_after=15)
                         else:
-                            await ctx.send("Ollama is not responding" + AI_MARKER, delete_after=5)
+                            await cmd_send(ctx, "Ollama is not responding" + AI_MARKER, delete_after=5)
             except Exception as e:
-                await ctx.send(f"Failed to connect to Ollama: {e}" + AI_MARKER, delete_after=5)
+                await cmd_send(ctx, f"Failed to connect to Ollama: {e}" + AI_MARKER, delete_after=5)
     elif action == "set":
         if not model_name:
-            await ctx.send(f"Specify a model: `{COMMAND_PREFIX}models set <model>`" + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, f"Specify a model: `{COMMAND_PREFIX}models set <model>`" + AI_MARKER, delete_after=5)
+            cleanup_msg_flags(ctx.message.id)
             return
         if backend_val == "gemini":
             config_data["ACTIVE_MODEL"] = model_name
         else:
             config_data["ACTIVE_OLLAMA_MODEL"] = model_name
         save_config()
-        await ctx.send(f"Active {backend_val} model set to `{model_name}`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Active {backend_val} model set to `{model_name}`" + AI_MARKER, delete_after=5)
     else:
-        await ctx.send(
+        await cmd_send(ctx,
             f"`{COMMAND_PREFIX}models list` — show models for current backend\n"
             f"`{COMMAND_PREFIX}models set <model>` — change active model" + AI_MARKER,
             delete_after=8
         )
+    cleanup_msg_flags(ctx.message.id)
 
 
 @bot.command()
@@ -955,7 +1055,6 @@ async def status(ctx):
     features = config_data.get("FEATURES", {})
 
     vertex_status = "Initialized" if gemini_client else "Not initialized"
-
     lyria_status = "Initialized" if lyria_client else "No API Key / Not initialized"
 
     ollama_status = "Checking..."
@@ -970,7 +1069,6 @@ async def status(ctx):
                     ollama_status = f"Responded with status {resp.status}"
     except:
         ollama_status = "Not running (localhost:11434)"
-
 
     allowed = config_data.get("ALLOWED_CHANNELS", [])
     channel_info = f"{len(allowed)} channel(s) whitelisted" if allowed else "All channels (no filter)"
@@ -1002,13 +1100,14 @@ async def status(ctx):
         f"**Channels:** {channel_info}\n"
         f"**Cooldown:** {cd_info}"
     )
-    await ctx.send(msg + AI_MARKER, delete_after=20)
+    await cmd_send(ctx, msg + AI_MARKER, delete_after=20)
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.group(invoke_without_command=True)
 async def channel(ctx):
     try: await ctx.message.delete()
     except: pass
-    await ctx.send(
+    await cmd_send(ctx,
         f"**Channel commands:**\n"
         f"`{COMMAND_PREFIX}channel status` — is this channel allowed?\n"
         f"`{COMMAND_PREFIX}channel add [id]` — add channel to whitelist\n"
@@ -1016,15 +1115,14 @@ async def channel(ctx):
         f"`{COMMAND_PREFIX}channel cooldown <seconds/false> [channel_id]` — set/remove cooldown" + AI_MARKER,
         delete_after=12
     )
+    cleanup_msg_flags(ctx.message.id)
 
 def _resolve_channel_id(ctx, arg: str = None) -> int | None:
     """Resolve a channel ID from an argument string or fall back to ctx.channel.id."""
     if arg:
-
         ch_mention = re.match(r'<#(\d+)>', arg)
         if ch_mention:
             return int(ch_mention.group(1))
-
         try:
             return int(arg)
         except ValueError:
@@ -1037,7 +1135,8 @@ async def channel_status(ctx, channel_id_arg: str = None):
     except: pass
     ch_id = _resolve_channel_id(ctx, channel_id_arg)
     if ch_id is None:
-        await ctx.send("Invalid channel ID." + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Invalid channel ID." + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     allowed = config_data.get("ALLOWED_CHANNELS", [])
     ch_cooldown = config_data.get("CHANNEL_COOLDOWNS", {}).get(str(ch_id))
@@ -1052,12 +1151,13 @@ async def channel_status(ctx, channel_id_arg: str = None):
 
     cd_str = f"{ch_cooldown}s (channel override)" if ch_cooldown is not None else f"{global_cd}s (global)"
 
-    await ctx.send(
+    await cmd_send(ctx,
         f"**Channel `{ch_id}`**\n"
         f"Status: {status_str}\n"
         f"Cooldown: {cd_str}" + AI_MARKER,
         delete_after=10
     )
+    cleanup_msg_flags(ctx.message.id)
 
 @channel.command(name="add")
 async def channel_add(ctx, channel_id_arg: str = None):
@@ -1065,15 +1165,17 @@ async def channel_add(ctx, channel_id_arg: str = None):
     except: pass
     ch_id = _resolve_channel_id(ctx, channel_id_arg)
     if ch_id is None:
-        await ctx.send("Invalid channel ID." + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Invalid channel ID." + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     allowed = config_data.setdefault("ALLOWED_CHANNELS", [])
     if ch_id not in allowed:
         allowed.append(ch_id)
         save_config()
-        await ctx.send(f"Channel `{ch_id}` added to whitelist" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Channel `{ch_id}` added to whitelist" + AI_MARKER, delete_after=5)
     else:
-        await ctx.send(f"Channel `{ch_id}` is already in the whitelist" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Channel `{ch_id}` is already in the whitelist" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @channel.command(name="remove")
 async def channel_remove(ctx, channel_id_arg: str = None):
@@ -1081,58 +1183,64 @@ async def channel_remove(ctx, channel_id_arg: str = None):
     except: pass
     ch_id = _resolve_channel_id(ctx, channel_id_arg)
     if ch_id is None:
-        await ctx.send("Invalid channel ID." + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Invalid channel ID." + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     allowed = config_data.get("ALLOWED_CHANNELS", [])
     if ch_id in allowed:
         allowed.remove(ch_id)
         save_config()
-        await ctx.send(f"Channel `{ch_id}` removed from whitelist" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Channel `{ch_id}` removed from whitelist" + AI_MARKER, delete_after=5)
     else:
-        await ctx.send(f"Channel `{ch_id}` wasn't in the whitelist" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Channel `{ch_id}` wasn't in the whitelist" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @channel.command(name="cooldown")
 async def channel_cooldown(ctx, value: str = None, channel_id_arg: str = None):
     try: await ctx.message.delete()
     except: pass
     if not value:
-        await ctx.send(
+        await cmd_send(ctx,
             f"Usage:\n"
             f"`{COMMAND_PREFIX}channel cooldown <seconds> [channel_id]` — set cooldown\n"
             f"`{COMMAND_PREFIX}channel cooldown false [channel_id]` — remove cooldown override" + AI_MARKER,
             delete_after=8
         )
+        cleanup_msg_flags(ctx.message.id)
         return
     ch_id = _resolve_channel_id(ctx, channel_id_arg)
     if ch_id is None:
-        await ctx.send("Invalid channel ID." + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Invalid channel ID." + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     channel_cds = config_data.setdefault("CHANNEL_COOLDOWNS", {})
     if value.lower() in ("false", "none", "off", "remove", "0"):
         if str(ch_id) in channel_cds:
             del channel_cds[str(ch_id)]
             save_config()
-            await ctx.send(f"Channel-specific cooldown for `{ch_id}` removed — using global cooldown now" + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, f"Channel-specific cooldown for `{ch_id}` removed — using global cooldown now" + AI_MARKER, delete_after=5)
         else:
-            await ctx.send(f"No channel-specific cooldown was set for `{ch_id}`" + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, f"No channel-specific cooldown was set for `{ch_id}`" + AI_MARKER, delete_after=5)
     else:
         try:
             seconds = float(value)
             if seconds < 0:
                 raise ValueError
         except ValueError:
-            await ctx.send("Cooldown must be a positive number or `false`." + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, "Cooldown must be a positive number or `false`." + AI_MARKER, delete_after=5)
+            cleanup_msg_flags(ctx.message.id)
             return
         channel_cds[str(ch_id)] = seconds
         save_config()
-        await ctx.send(f"Cooldown for channel `{ch_id}` set to `{seconds}s`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Cooldown for channel `{ch_id}` set to `{seconds}s`" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 
 @bot.group(invoke_without_command=True)
 async def memories(ctx):
     try: await ctx.message.delete()
     except: pass
-    await ctx.send(
+    await cmd_send(ctx,
         f"**Memory commands:**\n"
         f"**— View —**\n"
         f"`{COMMAND_PREFIX}memories all` — show everything (global + all users)\n"
@@ -1144,6 +1252,7 @@ async def memories(ctx):
         f"`{COMMAND_PREFIX}memories delete user <@user> [index]` — delete all/one user memory" + AI_MARKER,
         delete_after=15
     )
+    cleanup_msg_flags(ctx.message.id)
 
 def _format_memory_list(items: list[str], label: str) -> str:
     if not items:
@@ -1154,11 +1263,22 @@ def _format_memory_list(items: list[str], label: str) -> str:
     return out
 
 async def _send_memory_text(ctx, text: str, filename: str):
+    flags = get_msg_flags(ctx.message.id)
+    if flags.get("console"):
+        # Strip markdown for cleaner console output
+        clean = re.sub(r'\*\*|`', '', text).strip()
+        print(f"[BOT → console]\n{clean}")
+        cleanup_msg_flags(ctx.message.id)
+        return
+    if flags.get("silent"):
+        cleanup_msg_flags(ctx.message.id)
+        return
     if len(text) > 1900:
         file_obj = io.BytesIO(text.encode())
         await ctx.send("Too long, see file:" + AI_MARKER, file=discord.File(file_obj, filename), delete_after=30)
     else:
         await ctx.send(text + AI_MARKER, delete_after=30)
+    cleanup_msg_flags(ctx.message.id)
 
 @memories.command(name="global")
 async def memories_global(ctx):
@@ -1191,14 +1311,14 @@ async def memories_all(ctx):
             for i, fact in enumerate(facts, 1):
                 text += f"    `{i}.` {fact}\n"
     else:
-        text += "**👥 User Memories:** *(empty)*"
+        text += "**User Memories:** *(empty)*"
     await _send_memory_text(ctx, text, "all_memories.txt")
 
 @memories.group(name="delete", invoke_without_command=True)
 async def memories_delete(ctx):
     try: await ctx.message.delete()
     except: pass
-    await ctx.send(
+    await cmd_send(ctx,
         f"**Delete commands:**\n"
         f"`{COMMAND_PREFIX}memories delete all` — wipe ALL memories\n"
         f"`{COMMAND_PREFIX}memories delete global [index]` — delete all or one global memory\n"
@@ -1206,6 +1326,7 @@ async def memories_delete(ctx):
         f"*(Run `{COMMAND_PREFIX}memories global` or `memories user` first to see indexes)*" + AI_MARKER,
         delete_after=12
     )
+    cleanup_msg_flags(ctx.message.id)
 
 @memories_delete.command(name="all")
 async def memories_delete_all(ctx):
@@ -1215,7 +1336,8 @@ async def memories_delete_all(ctx):
         os.remove(GLOBAL_MEMORY_FILE)
     if os.path.exists(USER_MEMORIES_FILE):
         os.remove(USER_MEMORIES_FILE)
-    await ctx.send("Every memorie got deleted" + AI_MARKER, delete_after=3)
+    await cmd_send(ctx, "Every memorie got deleted" + AI_MARKER, delete_after=3)
+    cleanup_msg_flags(ctx.message.id)
 
 @memories_delete.command(name="global")
 async def memories_delete_global(ctx, index: str = None):
@@ -1223,52 +1345,59 @@ async def memories_delete_global(ctx, index: str = None):
     except: pass
     mems = load_global_memories()
     if not mems:
-        await ctx.send("No global memories to delete" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "No global memories to delete" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     if index is None:
         save_global_memories([])
-        await ctx.send("All global memories deleted" + AI_MARKER, delete_after=3)
+        await cmd_send(ctx, "All global memories deleted" + AI_MARKER, delete_after=3)
     else:
         try:
             idx = int(index) - 1
             if idx < 0 or idx >= len(mems):
                 raise ValueError
         except ValueError:
-            await ctx.send(f"Invalid index. Use 1–{len(mems)}." + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, f"Invalid index. Use 1–{len(mems)}." + AI_MARKER, delete_after=5)
+            cleanup_msg_flags(ctx.message.id)
             return
         removed = mems.pop(idx)
         save_global_memories(mems)
-        await ctx.send(f"Deleted global memory #{idx+1}: *{removed}*" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Deleted global memory #{idx+1}: *{removed}*" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @memories_delete.command(name="user")
 async def memories_delete_user(ctx, target: discord.Member = None, index: str = None):
     try: await ctx.message.delete()
     except: pass
     if target is None:
-        await ctx.send("Ping someone to use this command" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Ping someone to use this command" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     uid = str(target.id)
     all_mem = load_user_memories()
     user_mems = all_mem.get(uid, [])
     if not user_mems:
-        await ctx.send(f"No memories for {target.name}" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"No memories for {target.name}" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     if index is None:
         all_mem[uid] = []
         save_user_memories(all_mem)
-        await ctx.send(f"All memories for {target.name} deleted" + AI_MARKER, delete_after=3)
+        await cmd_send(ctx, f"All memories for {target.name} deleted" + AI_MARKER, delete_after=3)
     else:
         try:
             idx = int(index) - 1
             if idx < 0 or idx >= len(user_mems):
                 raise ValueError
         except ValueError:
-            await ctx.send(f"Invalid index. Use 1–{len(user_mems)}." + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, f"Invalid index. Use 1–{len(user_mems)}." + AI_MARKER, delete_after=5)
+            cleanup_msg_flags(ctx.message.id)
             return
         removed = user_mems.pop(idx)
         all_mem[uid] = user_mems
         save_user_memories(all_mem)
-        await ctx.send(f"Deleted memory #{idx+1} for {target.name}: *{removed}*" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Deleted memory #{idx+1} for {target.name}: *{removed}*" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.command()
 async def remember(ctx, *, text: str):
@@ -1286,7 +1415,7 @@ async def remember(ctx, *, text: str):
             all_mem[uid].append(fact)
             save_user_memories(all_mem)
         try:
-            await ctx.send(f"K gng ill remember dat for {target_user.name}" + AI_MARKER, delete_after=3)
+            await cmd_send(ctx, f"K gng ill remember dat for {target_user.name}" + AI_MARKER, delete_after=3)
         except:
             pass
     else:
@@ -1295,9 +1424,10 @@ async def remember(ctx, *, text: str):
             existing.append(text.strip())
             save_global_memories(existing)
         try:
-            await ctx.send("K gng ill remember dat globally" + AI_MARKER, delete_after=3)
+            await cmd_send(ctx, "K gng ill remember dat globally" + AI_MARKER, delete_after=3)
         except:
             pass
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.group(invoke_without_command=True, name="personality")
 async def personality_group(ctx, *, text: str = None):
@@ -1305,65 +1435,71 @@ async def personality_group(ctx, *, text: str = None):
     except: pass
 
     if not isinstance(ctx.channel, discord.DMChannel):
-        await ctx.send(
+        await cmd_send(ctx,
             "Personality can only be set in DMs\n"
             f"Slide into my DMs and use `{COMMAND_PREFIX}personality <your text>`" + AI_MARKER,
             delete_after=6
         )
+        cleanup_msg_flags(ctx.message.id)
         return
 
     allowed = config_data.get("ALLOWED_PERSONALITY_USERS", [])
     if ctx.author.id != bot.user.id and ctx.author.id not in allowed:
-        await ctx.send(
+        await cmd_send(ctx,
             "You don't have permission to set a personality\n"
             f"Ask the bot owner to run `{COMMAND_PREFIX}user allow @you personality`." + AI_MARKER,
             delete_after=6
         )
+        cleanup_msg_flags(ctx.message.id)
         return
 
     if not text or text.strip().lower() == "clear":
         clear_user_personality(ctx.author.id)
-        await ctx.send("Your personality has been cleared. Back to default vibes" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Your personality has been cleared. Back to default vibes" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
 
     set_user_personality(ctx.author.id, text.strip())
     preview = text.strip()[:100] + ("..." if len(text.strip()) > 100 else "")
-    await ctx.send(
+    await cmd_send(ctx,
         f"Your personal personality is set!\n"
         f"The AI will act like:\n*{preview}*\n\n"
         f"*(Use `{COMMAND_PREFIX}personality clear` to reset)*" + AI_MARKER,
         delete_after=12
     )
+    cleanup_msg_flags(ctx.message.id)
 
 @personality_group.command(name="clear")
 async def personality_clear(ctx):
     try: await ctx.message.delete()
     except: pass
     if not isinstance(ctx.channel, discord.DMChannel):
-        await ctx.send("Use this in DMs 🔒" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "Use this in DMs 🔒" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     clear_user_personality(ctx.author.id)
-    await ctx.send("Your personality cleared. Back to default" + AI_MARKER, delete_after=5)
+    await cmd_send(ctx, "Your personality cleared. Back to default" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 @personality_group.command(name="view")
 async def personality_view(ctx, target: discord.Member = None):
     try: await ctx.message.delete()
     except: pass
-    # Anyone can view their own; only bot owner can view others
     if target is None or target.id == ctx.author.id:
         p = get_user_personality(ctx.author.id)
         if p:
-            await ctx.send(f"**Your current personality:**\n```{p[:1500]}```" + AI_MARKER, delete_after=15)
+            await cmd_send(ctx, f"**Your current personality:**\n```{p[:1500]}```" + AI_MARKER, delete_after=15)
         else:
-            await ctx.send("You haven't set a personality yet" + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, "You haven't set a personality yet" + AI_MARKER, delete_after=5)
     elif ctx.author.id == bot.user.id:
         p = get_user_personality(target.id)
         if p:
-            await ctx.send(f"**Personality for {target.name}:**\n```{p[:1500]}```" + AI_MARKER, delete_after=15)
+            await cmd_send(ctx, f"**Personality for {target.name}:**\n```{p[:1500]}```" + AI_MARKER, delete_after=15)
         else:
-            await ctx.send(f"{target.name} has no personality set." + AI_MARKER, delete_after=5)
+            await cmd_send(ctx, f"{target.name} has no personality set." + AI_MARKER, delete_after=5)
     else:
-        await ctx.send("You can only view your own personality 🔒" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, "You can only view your own personality 🔒" + AI_MARKER, delete_after=5)
+    cleanup_msg_flags(ctx.message.id)
 
 # ---------------------------------------------------------
 # COMMANDS — MEDIA (standalone commands)
@@ -1372,12 +1508,15 @@ async def personality_view(ctx, target: discord.Member = None):
 @bot.command()
 async def image(ctx, *, prompt: str = None):
     if not prompt:
-        await ctx.send(f"Use it like: `{COMMAND_PREFIX}image [prompt]`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Use it like: `{COMMAND_PREFIX}image [prompt]`" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     await process_image_request(ctx.message, prompt)
+    cleanup_msg_flags(ctx.message.id)
 
 @bot.command()
 async def video(ctx, *, prompt: str = None):
+    # NOTE: video has no silent/console support — see process_video_request
     if not prompt:
         await ctx.send(f"Use it like: `{COMMAND_PREFIX}video [prompt]`" + AI_MARKER, delete_after=5)
         return
@@ -1386,9 +1525,11 @@ async def video(ctx, *, prompt: str = None):
 @bot.command()
 async def song(ctx, *, prompt: str = None):
     if not prompt:
-        await ctx.send(f"Use it like: `{COMMAND_PREFIX}song [prompt]`" + AI_MARKER, delete_after=5)
+        await cmd_send(ctx, f"Use it like: `{COMMAND_PREFIX}song [prompt]`" + AI_MARKER, delete_after=5)
+        cleanup_msg_flags(ctx.message.id)
         return
     await process_song_request(ctx.message, prompt)
+    cleanup_msg_flags(ctx.message.id)
 
 # ---------------------------------------------------------
 # COMMANDS — BOT CONTROL
@@ -1453,9 +1594,10 @@ async def purge(ctx, amount: int = 10, scope: str = "channel"):
                 except:
                     pass
     try:
-        await ctx.send(f"{deleted} messages deleted" + AI_MARKER, delete_after=3)
+        await cmd_send(ctx, f"{deleted} messages deleted" + AI_MARKER, delete_after=3)
     except:
         pass
+    cleanup_msg_flags(ctx.message.id)
 
 # ---------------------------------------------------------
 # EXECUTION
