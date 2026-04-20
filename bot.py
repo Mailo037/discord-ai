@@ -70,7 +70,15 @@ load_dotenv()
 #   GEMINI_API_KEY=your_api_key_here  (optional, only needed for song generation via Lyria)
 #   DISCORD_TOKEN=your_discord_token_here
 
-CONFIG_FILE = "config.json"
+# --- FILE PATHS ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+USER_MEMORIES_FILE = os.path.join(BASE_DIR, "user_memories.json")
+GLOBAL_MEMORY_FILE = os.path.join(BASE_DIR, "global_memory.txt")
+PERSONALITIES_FILE = os.path.join(BASE_DIR, "user_personalities.json")
+INSTRUCTIONS_FILE = os.path.join(BASE_DIR, "instructions.txt")
+REFRESH_FILE = os.path.join(BASE_DIR, "refresh_channel.txt")
+CREDENTIALS_FILE = os.path.join(BASE_DIR, "vertex-credentials.json")
 # config.json structure:
 # {
 #   "ALLOWED_CHANNELS": [],             // empty = respond everywhere
@@ -110,15 +118,15 @@ def load_config():
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(default_config, f, indent=4)
-            print(f"Created default {CONFIG_FILE}")
+            print(f"[+] Created default configuration: {CONFIG_FILE}")
         except Exception as e:
-            print(f"Failed to create config file: {e}")
+            print(f"[X] Failed to create config file: {e}")
         return default_config
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error reading {CONFIG_FILE}: {e}. Using default config.")
+        print(f"[!] Error reading {CONFIG_FILE}: {e}. Using default config.")
         return default_config
 
 config_data = load_config()
@@ -146,7 +154,6 @@ for key, default in [
         save_config()
 
 # --- CLIENTS ---
-CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "vertex-credentials.json")
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILE
 VERTEX_PROJECT = "cloudstore-c1b65"
 VERTEX_LOCATION = "us-central1"
@@ -198,33 +205,32 @@ def fmt_uptime(seconds: float) -> str:
     return " ".join(parts)
 
 def load_global_memories() -> list[str]:
-    if not os.path.exists("global_memory.txt"):
+    if not os.path.exists(GLOBAL_MEMORY_FILE):
         return []
     try:
-        with open("global_memory.txt", "r", encoding="utf-8") as f:
+        with open(GLOBAL_MEMORY_FILE, "r", encoding="utf-8") as f:
             return [line.strip().lstrip("- ").strip() for line in f if line.strip()]
     except:
         return []
 
 def save_global_memories(memories: list[str]):
-    with open("global_memory.txt", "w", encoding="utf-8") as f:
+    with open(GLOBAL_MEMORY_FILE, "w", encoding="utf-8") as f:
         for m in memories:
             f.write(f"- {m}\n")
 
 def load_user_memories() -> dict:
-    if not os.path.exists("user_memories.json"):
+    if not os.path.exists(USER_MEMORIES_FILE):
         return {}
     try:
-        with open("user_memories.json", "r", encoding="utf-8") as f:
+        with open(USER_MEMORIES_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return {}
 
 def save_user_memories(data: dict):
-    with open("user_memories.json", "w", encoding="utf-8") as f:
+    with open(USER_MEMORIES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-PERSONALITIES_FILE = "user_personalities.json"
 
 def load_user_personalities() -> dict:
     if not os.path.exists(PERSONALITIES_FILE):
@@ -350,11 +356,11 @@ async def on_ready():
     print(f'{COMMAND_PREFIX}refresh                 — Restart the bot')
     print('--------------------------------------------------')
 
-    if os.path.exists("refresh_channel.txt"):
+    if os.path.exists(REFRESH_FILE):
         try:
-            with open("refresh_channel.txt", "r") as f:
+            with open(REFRESH_FILE, "r") as f:
                 channel_id = int(f.read().strip())
-            os.remove("refresh_channel.txt")
+            os.remove(REFRESH_FILE)
             channel = bot.get_channel(channel_id)
             if channel:
                 await channel.send("back" + AI_MARKER, delete_after=5)
@@ -405,7 +411,7 @@ async def on_message(message):
 
     if message.content.startswith(f"{COMMAND_PREFIX}image ") and message.author.id in config_data.get("ALLOWED_IMAGE_USERS", []):
         if not features.get("IMAGE_ENABLED", True):
-            await safe_reply(message, content="Cant create an image rn. 🛑")
+            await safe_reply(message, content="Cant create an image rn.")
             return
         prompt = message.content[len(f"{COMMAND_PREFIX}image "):].strip()
         if prompt:
@@ -414,7 +420,7 @@ async def on_message(message):
 
     if message.content.startswith(f"{COMMAND_PREFIX}video ") and message.author.id in config_data.get("ALLOWED_VIDEO_USERS", []):
         if not features.get("VIDEO_ENABLED", True):
-            await safe_reply(message, content="Cant create a video rn. 🛑")
+            await safe_reply(message, content="Cant create a video rn.")
             return
         prompt = message.content[len(f"{COMMAND_PREFIX}video "):].strip()
         if prompt:
@@ -423,14 +429,14 @@ async def on_message(message):
 
     if message.content.startswith(f"{COMMAND_PREFIX}song ") and message.author.id in config_data.get("ALLOWED_SONG_USERS", []):
         if not features.get("SONG_ENABLED", True):
-            await safe_reply(message, content="Cant create a song rn. 🛑")
+            await safe_reply(message, content="Cant create a song rn.")
             return
         prompt = message.content[len(f"{COMMAND_PREFIX}song "):].strip()
         if prompt:
             await process_song_request(message, prompt)
             return
 
-    if bot.user not in message.mentions and not is_self_cmd and not is_dm:
+    if bot.user not in message.mentions and not is_self_cmd:
         await bot.process_commands(message)
         return
 
@@ -513,8 +519,8 @@ async def on_message(message):
         if personality:
             sys_instruct += f"[PERSONALITY set by this user]\n{personality}\n\n"
 
-        if os.path.exists("instructions.txt"):
-            with open("instructions.txt", "r", encoding="utf-8") as f:
+        if os.path.exists(INSTRUCTIONS_FILE):
+            with open(INSTRUCTIONS_FILE, "r", encoding="utf-8") as f:
                 sys_instruct += f.read().strip()
 
         if is_dm:
@@ -833,18 +839,27 @@ async def user_unban(ctx):
     await handle_list_toggle(ctx, "BANNED_USERS", "banned", add=False)
 
 @user.command(name="allow")
-async def user_allow(ctx, target: discord.Member = None, perm_type: str = None):
-    if not perm_type or perm_type.lower() not in ["image", "video", "song", "personality"]:
+async def user_allow(ctx, *args):
+    valid_perms = ["image", "video", "song", "personality"]
+    # We look for the perm type in any of the provided arguments
+    perm_type = next((x.lower() for x in args if x.lower() in valid_perms), None)
+
+    if not perm_type:
         await ctx.send("Specify what to allow: `image`, `video`, `song`, or `personality`" + AI_MARKER, delete_after=5)
         return
+
     list_key = f"ALLOWED_{perm_type.upper()}_USERS"
     await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=True)
 
 @user.command(name="deny")
-async def user_deny(ctx, target: discord.Member = None, perm_type: str = None):
-    if not perm_type or perm_type.lower() not in ["image", "video", "song", "personality"]:
+async def user_deny(ctx, *args):
+    valid_perms = ["image", "video", "song", "personality"]
+    perm_type = next((x.lower() for x in args if x.lower() in valid_perms), None)
+
+    if not perm_type:
         await ctx.send("Specify what to deny: `image`, `video`, `song`, or `personality`" + AI_MARKER, delete_after=5)
         return
+
     list_key = f"ALLOWED_{perm_type.upper()}_USERS"
     await handle_list_toggle(ctx, list_key, f"allowed to use {perm_type.lower()}", add=False)
 
@@ -1196,10 +1211,10 @@ async def memories_delete(ctx):
 async def memories_delete_all(ctx):
     try: await ctx.message.delete()
     except: pass
-    if os.path.exists("global_memory.txt"):
-        os.remove("global_memory.txt")
-    if os.path.exists("user_memories.json"):
-        os.remove("user_memories.json")
+    if os.path.exists(GLOBAL_MEMORY_FILE):
+        os.remove(GLOBAL_MEMORY_FILE)
+    if os.path.exists(USER_MEMORIES_FILE):
+        os.remove(USER_MEMORIES_FILE)
     await ctx.send("Every memorie got deleted" + AI_MARKER, delete_after=3)
 
 @memories_delete.command(name="global")
@@ -1391,7 +1406,7 @@ async def bye(ctx):
 
 @bot.command()
 async def refresh(ctx):
-    with open("refresh_channel.txt", "w") as f:
+    with open(REFRESH_FILE, "w") as f:
         f.write(str(ctx.channel.id))
     try:
         await ctx.message.delete()
